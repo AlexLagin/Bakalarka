@@ -2,6 +2,7 @@ import tkinter as tk
 import itertools
 import re
 
+
 ### FUNKCIE PRE LOGIKU PROGRAMU ###
 
 def show_frame(frame, clear_inputs=None):
@@ -13,6 +14,7 @@ def show_frame(frame, clear_inputs=None):
             elif isinstance(entry, tk.Text):
                 entry.delete("1.0", tk.END)
     frame.tkraise()
+
 
 def process_rules(rules_input):
     """
@@ -29,6 +31,7 @@ def process_rules(rules_input):
             rules[left] = ["" if r == "()" else r for r in right]
     return rules
 
+
 def find_simple_rules(grammar):
     """Nájde jednoduché pravidlá A -> B, kde B je neterminál (jedno písmeno)."""
     simple_rules = {}
@@ -37,6 +40,7 @@ def find_simple_rules(grammar):
             if len(prod) == 1 and prod.isupper():
                 simple_rules.setdefault(A, []).append(prod)
     return simple_rules
+
 
 def remove_simple_rules(grammar, simple_rules):
     """
@@ -55,17 +59,21 @@ def remove_simple_rules(grammar, simple_rules):
                             new_grammar[A].add(prod)
                             changed = True
         simple_rules = find_simple_rules(new_grammar)
+
     for A in list(new_grammar.keys()):
         new_grammar[A] = {p for p in new_grammar[A] if not (len(p) == 1 and p.isupper())}
+
     final_grammar = {A: list(v) for A, v in new_grammar.items()}
     return final_grammar
 
+
 def canonical_form(prod):
     """
-    Normalizuje produkciu: nahradí každý neterminál (veľké písmeno s voliteľným apostrofom)
-    jednotným symbolom "N". Terminály necháva nezmenené.
+    Nahradí každý neterminál (veľké písmeno s voliteľným apostrofom) symbolom N.
+    Terminály necháva nezmenené.
     """
     return re.sub(r"[A-Z](')?", "N", prod)
+
 
 def merge_equivalent_non_terminals_once(grammar, original_nonterminals):
     """
@@ -76,21 +84,30 @@ def merge_equivalent_non_terminals_once(grammar, original_nonterminals):
         canon_prods = sorted(canonical_form(p) for p in productions)
         key = tuple(canon_prods)
         reverse_grammar.setdefault(key, []).append(nt)
+
     merged_grammar = dict(grammar)
     changed = False
+
     for nts in reverse_grammar.values():
         if len(nts) > 1:
+            # preferujeme pôvodné neterminály
             candidates = [nt for nt in nts if nt in original_nonterminals]
             winner = candidates[0] if candidates else nts[0]
+
             for nt in nts:
                 if nt == winner:
                     continue
                 if nt in merged_grammar:
                     del merged_grammar[nt]
                 for A in list(merged_grammar.keys()):
-                    merged_grammar[A] = [p.replace(nt, winner) for p in merged_grammar[A]]
+                    new_prods = []
+                    for p in merged_grammar[A]:
+                        new_prods.append(p.replace(nt, winner))
+                    merged_grammar[A] = new_prods
             changed = True
+
     return merged_grammar, changed
+
 
 def merge_equivalent_non_terminals_fixpoint(grammar, original_nonterminals):
     """
@@ -102,6 +119,7 @@ def merge_equivalent_non_terminals_fixpoint(grammar, original_nonterminals):
         new_grammar, changed = merge_equivalent_non_terminals_once(current, original_nonterminals)
         current = new_grammar
     return current
+
 
 def find_epsilon_producing(grammar, non_terminals):
     """
@@ -134,39 +152,57 @@ def find_epsilon_producing(grammar, non_terminals):
                         break
     return epsilon_nt
 
+
 def parse_production(prod):
     """Rozdelí reťazec produkcie na symboly (1 znak = 1 symbol)."""
     return list(prod)
+
 
 def join_production(symbols):
     """Zloží zoznam symbolov do reťazca."""
     return "".join(symbols)
 
+
 def remove_epsilon_productions(grammar, start_symbol, epsilon_nt):
     """
-    Odstráni ε‑pravidlá (A->ε) a vytvorí varianty produkcií,
+    Odstráni ε-pravidlá (A->ε) a vytvorí varianty produkcií,
     kde sa epsilonotvorné neterminály vynechajú.
     """
-    new_grammar = {A: set() for A in grammar}
+    new_grammar = {}
+    for A in grammar.keys():
+        new_grammar[A] = set()
+
     for A, productions in grammar.items():
         for p in productions:
             symbols = parse_production(p)
             nullable_positions = [i for i, sym in enumerate(symbols) if sym in epsilon_nt]
+
             subsets = itertools.chain.from_iterable(
                 itertools.combinations(nullable_positions, r)
                 for r in range(len(nullable_positions) + 1)
             )
+
             for subset in subsets:
-                new_symbols = [s for i, s in enumerate(symbols) if i not in subset]
-                new_grammar[A].add(join_production(new_symbols))
-    for A in new_grammar:
-        new_grammar[A].discard("")
-    final_grammar = {A: list(prods) for A, prods in new_grammar.items() if prods}
+                new_symbols = list(symbols)
+                for idx in sorted(subset, reverse=True):
+                    new_symbols.pop(idx)
+                new_p = join_production(new_symbols)
+                new_grammar[A].add(new_p)
+
+    for A in list(new_grammar.keys()):
+        if "" in new_grammar[A]:
+            new_grammar[A].remove("")
+
+    final_grammar = {}
+    for A, prod_set in new_grammar.items():
+        if prod_set:
+            final_grammar[A] = list(prod_set)
     return final_grammar
+
 
 def create_new_start_symbol_if_epsilon(final_grammar, original_start, epsilon_nt):
     """
-    Ak je pôvodný štartovací symbol ε‑tvorivý,
+    Ak je pôvodný štartovací symbol ε-tvorivý,
     pridá sa nový štartovací symbol S' s pravidlami:
        S' -> original_start  |  ε
     """
@@ -175,6 +211,7 @@ def create_new_start_symbol_if_epsilon(final_grammar, original_start, epsilon_nt
         final_grammar[new_start] = [original_start, ""]
         return final_grammar, new_start
     return final_grammar, original_start
+
 
 def find_neperspektivne(grammar, non_terminals):
     """
@@ -188,11 +225,18 @@ def find_neperspektivne(grammar, non_terminals):
             if nt in productive:
                 continue
             for prod in productions:
-                if all((ch not in grammar) or (ch in productive) for ch in prod):
+                symbols = parse_production(prod)
+                is_prod = True
+                for sym in symbols:
+                    if sym in non_terminals and sym not in productive:
+                        is_prod = False
+                        break
+                if is_prod:
                     productive.add(nt)
                     changed = True
                     break
     return set(non_terminals) - productive
+
 
 def remove_unproductive(grammar, unproductive):
     """
@@ -202,10 +246,15 @@ def remove_unproductive(grammar, unproductive):
     for nt, productions in grammar.items():
         if nt in unproductive:
             continue
-        valid = [p for p in productions if not any(u in p for u in unproductive)]
+        valid = []
+        for prod in productions:
+            if any(u in prod for u in unproductive):
+                continue
+            valid.append(prod)
         if valid:
             clean[nt] = valid
     return clean
+
 
 def find_unreachable(grammar, start_symbol, protected=set()):
     """
@@ -213,17 +262,24 @@ def find_unreachable(grammar, start_symbol, protected=set()):
     Neterminály v 'protected' zostanú vždy dostupné.
     """
     if start_symbol not in grammar:
-        return set(grammar) - protected
-    reachable = set(protected) | {start_symbol}
+        return set(grammar.keys()) - protected
+
+    reachable = set(protected)
+    reachable.add(start_symbol)
     queue = [start_symbol]
+
     while queue:
         cur = queue.pop()
-        for prod in grammar.get(cur, []):
-            for nt in grammar:
+        if cur not in grammar:
+            continue
+        for prod in grammar[cur]:
+            for nt in grammar.keys():
                 if nt in prod and nt not in reachable:
                     reachable.add(nt)
                     queue.append(nt)
-    return set(grammar) - reachable
+
+    return set(grammar.keys()) - reachable
+
 
 def remove_unreachable(grammar, unreachable, protected=set()):
     """
@@ -234,10 +290,17 @@ def remove_unreachable(grammar, unreachable, protected=set()):
     for nt, productions in grammar.items():
         if nt in unreachable and nt not in protected:
             continue
-        valid = [p for p in productions if not any(u in p for u in unreachable if u not in protected)]
+        valid = []
+        for prod in productions:
+            if any(u in prod for u in unreachable if u not in protected):
+                continue
+            valid.append(prod)
         if valid:
             clean[nt] = valid
     return clean
+
+
+# NOVÉ FUNKCIE NA DETEKCIU ĽAVEJ REKURZIE
 
 def check_left_recursion(grammar):
     """
@@ -246,181 +309,559 @@ def check_left_recursion(grammar):
       - Nepriama ľavá rekurzia: A => Bα =>* Aα'
     Vráti dvojicu množín (direct, indirect).
     """
-    direct, indirect = set(), set()
-    for A, prods in grammar.items():
-        for p in prods:
-            if p and p[0] == A:
+    direct = set()
+    indirect = set()
+
+    for A, productions in grammar.items():
+        for prod in productions:
+            if not prod:
+                continue
+
+            # priama ľavá rekurzia – A -> Aα
+            if prod.startswith(A):
                 direct.add(A)
-            elif p and p[0].isupper() and p[0] != A:
-                if leads_leftmost_to_A(A, p[0], grammar):
+            # nepriama – A -> Bα a z B sa ľavmostne dostaneme k A
+            elif prod[0].isupper() and not prod.startswith(A):
+                B = prod[0]
+                if leads_leftmost_to_A(A, B, grammar):
                     indirect.add(A)
+
     return direct, indirect
+
 
 def leads_leftmost_to_A(current, target, grammar, visited=None):
     """
-    Pomocná funkcia pre detekciu nepriamych cyklov ľavej rekurzie.
+    Zistí, či z neterminálu 'current' existuje (ľavmostná) derivácia,
+    ktorej prvý symbol je 'target'.
     """
     if visited is None:
         visited = set()
+
     if current in visited:
         return False
     visited.add(current)
+
     for p in grammar.get(current, []):
-        if p and p[0] == target:
+        if not p:
+            continue
+        first_sym = p[0]
+        if first_sym == target:
             return True
-        if p and p[0].isupper() and p[0] != target:
-            if leads_leftmost_to_A(p[0], target, grammar, visited.copy()):
+        if first_sym.isupper() and first_sym != target:
+            if leads_leftmost_to_A(first_sym, target, grammar, visited.copy()):
                 return True
+
     return False
+
+
+# FUNKCIE PRE ODSTRAŇOVANIE PRIAMEJ A NEPRIAMEJ ĽAVEJ REKURZIE (IBA ODZADU)
 
 def remove_direct_left_recursion_for(ordered_nonterminals, grammar, orig_start):
     """
-    Odstráni priamu ľavú rekurziu pre každý neterminál A v ordered_nonterminals.
+    Odstráni priamu ľavú rekurziu pre zadaný zoznam neterminálov.
+    Ak je neterminál rovný orig_start, vytvorí sa nový neterminál "Z",
+    inak sa použije nt + "'" (pripájanie apostrofov).
     """
     for nt in ordered_nonterminals:
         if nt not in grammar:
             continue
         prods = grammar[nt]
-        alpha, beta = [], []
+        alpha = []
+        beta = []
         for prod in prods:
             if prod.startswith(nt):
                 alpha.append(prod[len(nt):])
             else:
                 beta.append(prod)
+
         if alpha:
-            candidate = "Z" if nt == orig_start else nt + "'"
+            if nt == orig_start and 'Z' not in ordered_nonterminals:
+                candidate = "Z"
+                ordered_nonterminals.insert(0, candidate)
+            else:
+                candidate = nt + "'"
+
             while candidate in grammar:
                 candidate += "'"
+
             grammar[candidate] = []
             new_beta = []
             for b in beta:
-                new_beta += [b, b + candidate]
+                new_beta.append(b)
+                new_beta.append(b + candidate)
             grammar[nt] = new_beta
+
             new_alpha = []
             for a in alpha:
-                new_alpha += [a + candidate, a]
+                new_alpha.append(a + candidate)
+                new_alpha.append(a)
             grammar[candidate] = new_alpha
 
-def remove_indirect_left_recursion_bottom_up(grammar, ordered_nonterminals, orig_start):
+
+def remove_indirect_left_recursion_bottom_up(grammar, ordered_nonterminals, orig_start, direct):
     """
-    Odstráni nepriame ľavé rekurzie:
-    najprv priamu, potom postupne mení Aj->Aiα, ...
+    Odstráni nepriamu ľavú rekurziu pomocou substitúcie zdola nahor.
+    Najprv sa vykoná odstránenie priamych rekurzií pre všetky neterminály
+    a následne sa dosadia pravidlá substitúciou.
     """
     G = {A: list(prods) for A, prods in grammar.items()}
-    remove_direct_left_recursion_for(ordered_nonterminals, G, orig_start)
+
+    if direct:
+        remove_direct_left_recursion_for(ordered_nonterminals, G, orig_start)
+        direct = False
+
     for i in reversed(range(len(ordered_nonterminals))):
         Ai = ordered_nonterminals[i]
         if Ai not in G:
             continue
-        for j in range(i):
+        for j in range(i + 1):
             Aj = ordered_nonterminals[j]
             if Aj not in G:
+                continue
+            if Aj == Ai:
                 continue
             new_prods = []
             for prod in G[Aj]:
                 if prod.startswith(Ai):
-                    suff = prod[len(Ai):]
-                    for g in G[Ai]:
-                        new_prods.append(g + suff)
+                    alpha = prod[len(Ai):]
+                    for gamma in G[Ai]:
+                        new_prods.append(gamma + alpha)
                 else:
                     new_prods.append(prod)
             G[Aj] = new_prods
+
     return G
+
 
 def merge_new_with_original(grammar, original_nonterminals):
     """
-    Zlúči novovzniknuté neterminály s pôvodnými.
+    Prejde gramatiku a pre každý neterminál, ktorý NIE JE v original_nonterminals,
+    ak existuje neterminál z original_nonterminals s rovnakou canonical formou,
+    nahradí nový neterminál tým pôvodným.
     """
     new_grammar = dict(grammar)
-    for nt in list(new_grammar):
+
+    for nt in list(new_grammar.keys()):
         if nt in original_nonterminals:
             continue
         canon_nt = sorted(canonical_form(p) for p in new_grammar[nt])
-        for old in original_nonterminals:
-            if old in new_grammar:
-                canon_old = sorted(canonical_form(p) for p in new_grammar[old])
+        for old_nt in original_nonterminals:
+            if old_nt in new_grammar:
+                canon_old = sorted(canonical_form(p) for p in new_grammar[old_nt])
                 if canon_nt == canon_old:
-                    new_grammar = force_rename_new_to_old(new_grammar, old, nt)
+                    new_grammar = force_rename_new_to_old(new_grammar, old_nt, nt)
                     break
+
     return new_grammar
+
 
 def merge_new_with_original_fixpoint(grammar, original_nonterminals):
     """
-    Fixpoint pre merge_new_with_original.
+    Opakovane volá merge_new_with_original, kým sa nedosiahne fixpoint.
     """
     changed = True
     current = grammar
     while changed:
         new_grammar = merge_new_with_original(current, original_nonterminals)
-        changed = (new_grammar != current)
-        current = new_grammar
+        if new_grammar == current:
+            changed = False
+        else:
+            current = new_grammar
+            changed = True
     return current
+
 
 def force_rename_new_to_old(grammar, old_nt, new_nt):
     """
-    Premenuje všetky výskyty new_nt na old_nt a odstráni new_nt.
+    Vo všetkých produkciách nahradí výskyty new_nt za old_nt,
+    zlúči produkcie (ponechá iba tie pôvodné old_nt),
+    a odstráni new_nt z gramatiky.
     """
     if new_nt not in grammar or old_nt not in grammar:
         return grammar
-    updated = {}
-    for A, prods in grammar.items():
-        updated[A] = [p.replace(new_nt, old_nt) for p in prods]
-    updated.pop(new_nt, None)
-    return updated
 
-def generate_grammar(entry_start, entry_rules, label_output):
+    new_grammar = dict(grammar)
+
+    for A in list(new_grammar.keys()):
+        new_prods = []
+        for p in new_grammar[A]:
+            new_prods.append(p.replace(new_nt, old_nt))
+        new_grammar[A] = new_prods
+
+    if new_nt in new_grammar:
+        del new_grammar[new_nt]
+
+    return new_grammar
+
+
+def generate_strings_up_to_length(grammar, start_symbol, max_length):
     """
-    Spracuje vstupnú gramatiku krok za krokom:
-    ε-pravidlá, nový start, jednoduché, ľavá rekurzia,
-    neperspektívne, nedostupné, zlúčenie NT.
+    Vygeneruje všetky terminálne reťazce jazyka gramatiky `grammar`
+    odvodené zo štartovacieho symbolu `start_symbol` s dĺžkou <= max_length.
     """
-    S = entry_start.get().strip()
-    rules_in = entry_rules.get("1.0", tk.END).strip().splitlines()
-    G0 = process_rules(rules_in)
-    orig_nt = list(G0)
+    if start_symbol not in grammar:
+        return []
 
-    eps = find_epsilon_producing(G0, orig_nt)
-    G1 = remove_epsilon_productions(G0, S, eps)
-    G2, S2 = create_new_start_symbol_if_epsilon(G1, S, eps)
+    nonterminals = set(grammar.keys())
+    sorted_nts = sorted(nonterminals, key=len, reverse=True)
 
-    G3 = remove_simple_rules(G2, find_simple_rules(G2))
-    direct, indirect = check_left_recursion(G3)
-    if indirect:
-        order = list(orig_nt)
-        if S2 not in order:
-            order.insert(0, S2)
-        G4 = remove_indirect_left_recursion_bottom_up(G3, order, S)
+    def tokenize(prod):
+        tokens = []
+        i = 0
+        while i < len(prod):
+            matched = None
+            for nt in sorted_nts:
+                if prod.startswith(nt, i):
+                    matched = nt
+                    break
+            if matched is not None:
+                tokens.append(matched)
+                i += len(matched)
+            else:
+                tokens.append(prod[i])
+                i += 1
+        return tokens
+
+    memo_nt = {}
+    memo_seq = {}
+
+    def gen_nt(nt, remaining, stack):
+        key = (nt, remaining)
+        if key in memo_nt:
+            return memo_nt[key]
+        if key in stack:
+            return set()
+        stack.add(key)
+        results = set()
+        for prod in grammar.get(nt, []):
+            if prod == "":
+                if remaining >= 0:
+                    results.add("")
+                continue
+            tokens = tokenize(prod)
+            for s in gen_seq(tokens, remaining, stack):
+                if len(s) <= remaining:
+                    results.add(s)
+        stack.remove(key)
+        memo_nt[key] = results
+        return results
+
+    def gen_seq(tokens, remaining, stack):
+        key = (tuple(tokens), remaining)
+        if key in memo_seq:
+            return memo_seq[key]
+        if remaining < 0:
+            return set()
+        if not tokens:
+            return {""}
+        first, *rest = tokens
+        results = set()
+        if first in nonterminals:
+            for s1 in gen_nt(first, remaining, stack):
+                rem = remaining - len(s1)
+                if rem < 0:
+                    continue
+                for s2 in gen_seq(rest, rem, stack):
+                    results.add(s1 + s2)
+        else:
+            t = first
+            if remaining < len(t):
+                memo_seq[key] = set()
+                return set()
+            for s2 in gen_seq(rest, remaining - len(t), stack):
+                results.add(t + s2)
+        memo_seq[key] = results
+        return results
+
+    all_strings = set()
+    for s in gen_nt(start_symbol, max_length, set()):
+        if len(s) <= max_length:
+            all_strings.add(s)
+
+    return sorted(all_strings, key=lambda x: (len(x), x))
+
+
+def generate_grammar(entry_start, entry_len, entry_rules, text_output, update_scrollbar):
+    """
+    Spracuje gramatiku, optimalizuje ju a zobrazí výslednú BKG + reťazce do zadanej dĺžky.
+    Teraz sa neterminály berú automaticky z ľavých strán pravidiel.
+    """
+    start_symbol = entry_start.get().strip()
+    rules_input = entry_rules.get("1.0", tk.END).strip().split("\n")
+
+    # dĺžka reťazcov na generovanie
+    length_text = entry_len.get().strip()
+    max_length = None
+    if length_text:
+        try:
+            max_length = int(length_text)
+            if max_length < 0:
+                max_length = None
+        except ValueError:
+            max_length = None
+
+    # pôvodná gramatika
+    original_grammar = process_rules(rules_input)
+    original_non_terminals = list(original_grammar.keys())
+
+    # 1) ε-pravidlá
+    epsilon_nt = find_epsilon_producing(original_grammar, original_non_terminals)
+    grammar_eps = remove_epsilon_productions(original_grammar, start_symbol, epsilon_nt)
+
+    # 2) nový štart (ak treba)
+    grammar_with_start, new_start_symbol = create_new_start_symbol_if_epsilon(
+        grammar_eps, start_symbol, epsilon_nt
+    )
+
+    # 3) jednoduché pravidlá
+    grammar_no_simple = remove_simple_rules(
+        grammar_with_start, find_simple_rules(grammar_with_start)
+    )
+
+    # 4) ľavá rekurzia
+    direct = False
+    direct_rec, indirect_rec = check_left_recursion(grammar_no_simple)
+
+    if indirect_rec:
+        if direct_rec:
+            direct = True
+        ordered_nts = list(reversed(grammar_no_simple.keys()))
+        grammar_left = remove_indirect_left_recursion_bottom_up(
+            grammar_no_simple, ordered_nts, start_symbol, direct
+        )
     else:
-        G4 = dict(G3)
-        for A in list(G3):
-            remove_direct_left_recursion_for([A], G4, S)
+        ordered_nts = list(grammar_no_simple.keys())
+        G = {A: list(prods) for A, prods in grammar_no_simple.items()}
+        for A in ordered_nts:
+            remove_direct_left_recursion_for([A], G, start_symbol)
+        grammar_left = G
+        direct_rec = set()
+        direct = False
 
-    unprod = find_neperspektivne(G4, orig_nt)
-    G5 = remove_unproductive(G4, unprod)
-    unreach = find_unreachable(G5, S2, {S2, "Z"})
-    G6 = remove_unreachable(G5, unreach, {S2, "Z"})
+    # ešte raz jednoduché pravidlá + kontrola
+    grammar_no_simple = remove_simple_rules(grammar_left, find_simple_rules(grammar_left))
+    direct_rec, indirect_rec = check_left_recursion(grammar_no_simple)
 
-    G7 = merge_equivalent_non_terminals_fixpoint(G6, orig_nt)
+    if indirect_rec:
+        ordered_nts = list(reversed(grammar_no_simple.keys()))
+        if new_start_symbol != start_symbol and new_start_symbol not in ordered_nts:
+            ordered_nts.insert(0, new_start_symbol)
+        grammar_left = remove_indirect_left_recursion_bottom_up(
+            grammar_no_simple, ordered_nts, start_symbol, direct
+        )
+    else:
+        ordered_nts = list(grammar_no_simple.keys())
+        G = {A: list(prods) for A, prods in grammar_no_simple.items()}
+        for A in ordered_nts:
+            remove_direct_left_recursion_for([A], G, start_symbol)
+        grammar_left = G
+        direct_rec = set()
+        direct = False
 
-    lines = [f"{A} -> " + " | ".join("ε" if p=="" else p for p in prods)
-             for A, prods in G7.items()]
-    label_output.config(text="Výsledná gramatika:\n" + "\n".join(lines))
+    # 5) neperspektívne + nedostupné neterminály
+    protected = {new_start_symbol}
+    unproductive = find_neperspektivne(grammar_left, original_non_terminals)
+    grammar_prod = remove_unproductive(grammar_left, unproductive)
+    unreachable = find_unreachable(grammar_prod, new_start_symbol, protected)
+    grammar_reach = remove_unreachable(grammar_prod, unreachable, protected)
+
+    # 6) zlúčenie ekvivalentných neterminálov
+    final_grammar = merge_equivalent_non_terminals_fixpoint(
+        grammar_reach, original_non_terminals
+    )
+
+    # výpis gramatiky
+    lines = []
+    if final_grammar:
+        for lhs, prods in final_grammar.items():
+            pstr = " | ".join("ε" if p == "" else p for p in prods)
+            lines.append(f"{lhs} -> {pstr}")
+        output = "Výsledná gramatika:\n" + "\n".join(lines)
+    else:
+        output = "Žiadna gramatika neostala"
+
+    # reťazce do danej dĺžky
+    if final_grammar and max_length is not None:
+        strings = generate_strings_up_to_length(final_grammar, new_start_symbol, max_length)
+        if strings:
+            pretty = [("ε" if s == "" else s) for s in strings]
+            output += f"\n\nReťazce jazyka do dĺžky {max_length}:\n" + ", ".join(pretty)
+        else:
+            output += f"\n\nPre dĺžku <= {max_length} sa nepodarilo odvodiť žiadne reťazce."
+
+    # zapíšeme do Text widgetu (read-only)
+    text_output.config(state="normal")
+    text_output.delete("1.0", tk.END)
+    text_output.insert("1.0", output)
+    text_output.config(state="disabled")
+    update_scrollbar()
 
 
-### FUNKCIE PRE GRAFICKÉ ROZHRANIE ###
+### NASTAVENIA GUI ###
 
-BG_COLOR    = '#d0e7f9'
-TEXT_COLOR  = '#00274d'
-BUTTON_BG   = '#00509e'
-BUTTON_FG   = 'white'
-TITLE_FONT  = ("Arial", 20, "bold")
-LABEL_FONT  = ("Arial", 14)
-ENTRY_FONT  = ("Arial", 14)
+BG_COLOR = '#d0e7f9'
+TEXT_COLOR = '#00274d'
+BUTTON_BG = '#00509e'
+BUTTON_FG = 'white'
+TITLE_FONT = ("Arial", 20, "bold")
+LABEL_FONT = ("Arial", 14)
+ENTRY_FONT = ("Arial", 14)
 BUTTON_FONT = ("Arial", 16)
 
+
+def setup_main_frame():
+    frame_main.grid_rowconfigure(0, weight=0)
+    frame_main.grid_rowconfigure(1, weight=0)
+    frame_main.grid_rowconfigure(2, weight=1)
+    frame_main.grid_columnconfigure(0, weight=1)
+
+    title_frame = tk.Frame(frame_main, bg=BG_COLOR)
+    title_frame.grid(row=0, column=0, pady=(20, 10), sticky="n")
+    tk.Label(title_frame, text="Testovanie ekvivalencie", font=TITLE_FONT,
+             bg=BG_COLOR, fg=TEXT_COLOR).pack()
+    tk.Label(title_frame, text="bezkontextových gramatík", font=TITLE_FONT,
+             bg=BG_COLOR, fg=TEXT_COLOR).pack()
+
+    frame_buttons = tk.Frame(frame_main, bg=BG_COLOR)
+    frame_buttons.grid(row=1, column=0, pady=(10, 0), sticky="n")
+
+    tk.Button(
+        frame_buttons,
+        text="Zadávanie gramatiky G1",
+        command=lambda: show_frame(frame_grammar1),
+        font=BUTTON_FONT,
+        width=20,
+        height=2,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+    ).pack(pady=5)
+
+    tk.Button(
+        frame_buttons,
+        text="Zadávanie gramatiky G2",
+        command=lambda: show_frame(frame_grammar2),
+        font=BUTTON_FONT,
+        width=20,
+        height=2,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+    ).pack(pady=5)
+
+
+def setup_grammar_frame(frame, title_text):
+    frame.grid_rowconfigure(0, weight=0)
+    frame.grid_rowconfigure(1, weight=0)
+    frame.grid_rowconfigure(2, weight=1)   # výstup môže rásť
+    frame.grid_rowconfigure(3, weight=0)
+    frame.grid_columnconfigure(0, weight=1)
+
+    tk.Label(frame, text=title_text, font=TITLE_FONT,
+             bg=BG_COLOR, fg=TEXT_COLOR).grid(
+        row=0, column=0, pady=(10, 5), sticky="n"
+    )
+
+    frame_inputs = tk.Frame(frame, bg=BG_COLOR)
+    frame_inputs.grid(row=1, column=0, pady=(5, 10), sticky="n")
+
+    # S - počiatočný symbol
+    tk.Label(frame_inputs, text="S -", font=LABEL_FONT,
+             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=0, column=0, pady=5, sticky="w")
+    entry_start = tk.Entry(frame_inputs, font=ENTRY_FONT)
+    entry_start.grid(row=0, column=1, pady=5, padx=10, sticky="ew")
+
+    # L - maximálna dĺžka reťazcov
+    tk.Label(frame_inputs, text="L -", font=LABEL_FONT,
+             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=1, column=0, pady=5, sticky="w")
+    entry_len = tk.Entry(frame_inputs, font=ENTRY_FONT)
+    entry_len.grid(row=1, column=1, pady=5, padx=10, sticky="ew")
+
+    # P - pravidlá
+    tk.Label(frame_inputs, text="P -", font=LABEL_FONT,
+             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=2, column=0, pady=5, sticky="w")
+    entry_rules = tk.Text(frame_inputs, width=40, height=4, font=ENTRY_FONT)
+    entry_rules.grid(row=2, column=1, pady=5, padx=10, sticky="ew")
+
+    frame_inputs.grid_columnconfigure(1, weight=1)
+
+    # --- výstupný Text + scrollbar ---
+    output_frame = tk.Frame(frame, bg=BG_COLOR)
+    output_frame.grid(row=2, column=0, pady=10, padx=20, sticky="nsew")
+    output_frame.grid_rowconfigure(0, weight=1)
+    output_frame.grid_columnconfigure(0, weight=1)
+
+    text_output = tk.Text(
+        output_frame,
+        font=ENTRY_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR,
+        wrap="word",
+        height=8,
+        borderwidth=0,
+        highlightthickness=0,
+    )
+    text_output.grid(row=0, column=0, sticky="nsew")
+
+    scrollbar = tk.Scrollbar(output_frame, orient="vertical",
+                             command=text_output.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    scrollbar.grid_remove()   # na začiatku skryjeme
+
+    def update_scrollbar():
+        """Zobrazí / skryje scrollbar podľa dĺžky textu."""
+        text_output.update_idletasks()
+        info = text_output.dlineinfo("end-1c")
+        if info is None:
+            scrollbar.grid_remove()
+            return
+        y_bottom = info[1] + info[3]
+        if y_bottom > text_output.winfo_height():
+            scrollbar.grid(row=0, column=1, sticky="ns")
+        else:
+            scrollbar.grid_remove()
+
+    def yscrollcommand(*args):
+        scrollbar.set(*args)
+
+    text_output.configure(yscrollcommand=yscrollcommand)
+
+    def on_output_configure(event):
+        update_scrollbar()
+
+    output_frame.bind("<Configure>", on_output_configure)
+
+    # tlačidlá
+    frame_buttons = tk.Frame(frame, bg=BG_COLOR)
+    frame_buttons.grid(row=3, column=0, pady=(10, 0), sticky="n")
+
+    entries = [entry_start, entry_len, entry_rules]
+
+    tk.Button(
+        frame_buttons,
+        text="Zobraziť gramatiku",
+        command=lambda: generate_grammar(
+            entry_start, entry_len, entry_rules,
+            text_output, update_scrollbar
+        ),
+        font=BUTTON_FONT,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+    ).pack(pady=5)
+
+    tk.Button(
+        frame_buttons,
+        text="Späť",
+        command=lambda: show_frame(frame_main, entries),
+        font=BUTTON_FONT,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+    ).pack(pady=5)
+
+
+### HLAVNÉ OKNO ###
+
 root = tk.Tk()
-root.title("Testovanie ekvivalencie bezkontextových gramatík")
-root.geometry("1000x700")   # Väčšie hlavné okno
+root.title("Testovanie")
+root.geometry("1000x650")
 root.configure(bg=BG_COLOR)
 
 container = tk.Frame(root)
@@ -428,73 +869,16 @@ container.pack(fill="both", expand=True)
 container.grid_rowconfigure(0, weight=1)
 container.grid_columnconfigure(0, weight=1)
 
-frame_main     = tk.Frame(container, bg=BG_COLOR)
+frame_main = tk.Frame(container, bg=BG_COLOR)
 frame_grammar1 = tk.Frame(container, bg=BG_COLOR)
 frame_grammar2 = tk.Frame(container, bg=BG_COLOR)
+
 for f in (frame_main, frame_grammar1, frame_grammar2):
     f.grid(row=0, column=0, sticky="nsew")
 
-def setup_main_frame():
-    frame_main.grid_rowconfigure(0, weight=0)
-    frame_main.grid_rowconfigure(1, weight=1)
-    frame_main.grid_columnconfigure(0, weight=1)
-    tk.Label(frame_main,
-             text="Testovanie ekvivalencie bezkontextových gramatík",
-             font=TITLE_FONT, bg=BG_COLOR, fg=TEXT_COLOR).pack(pady=(20,10))
-    btnf = tk.Frame(frame_main, bg=BG_COLOR)
-    # Menšia medzera nad tlačidlami, tlačidlá vyššie
-    btnf.pack(pady=(0,20), expand=True)
-    tk.Button(btnf, text="Zadávanie gramatiky G1",
-              command=lambda: show_frame(frame_grammar1),
-              font=BUTTON_FONT, width=20, height=2,
-              bg=BUTTON_BG, fg=BUTTON_FG).pack(pady=5)
-    tk.Button(btnf, text="Zadávanie gramatiky G2",
-              command=lambda: show_frame(frame_grammar2),
-              font=BUTTON_FONT, width=20, height=2,
-              bg=BUTTON_BG, fg=BUTTON_FG).pack(pady=5)
-
-def setup_grammar_frame(frame, title_text):
-    # Definícia rozvrhnutia riadkov a stĺpcov
-    for i in range(7):
-        frame.grid_rowconfigure(i, weight=0)
-    frame.grid_rowconfigure(5, weight=1)   # expanzia až pod výstupom
-    frame.grid_columnconfigure(0, weight=1)
-
-    # Nadpis sekcie
-    tk.Label(frame, text=title_text,
-             font=TITLE_FONT, bg=BG_COLOR, fg=TEXT_COLOR).grid(row=0, column=0, pady=(10,5))
-
-    # Štartovací neterminál – label nad vstupom, centrovaný
-    tk.Label(frame, text="Štartovací neterminál",
-             font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR).grid(row=1, column=0, pady=5)
-    entry_start = tk.Entry(frame, font=ENTRY_FONT)
-    entry_start.grid(row=2, column=0, sticky="ew", padx=(200,200), pady=5)
-
-    # Pravidlá – label nad textom, centrovaný
-    tk.Label(frame, text="Pravidlá",
-             font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR).grid(row=3, column=0, pady=5)
-    entry_rules = tk.Text(frame, width=60, height=8, font=ENTRY_FONT)
-    entry_rules.grid(row=4, column=0, sticky="ew", padx=(200,200), pady=5)
-
-    # Výstup – centrovaný
-    label_output = tk.Label(frame, text="", font=ENTRY_FONT,
-                            bg=BG_COLOR, fg=TEXT_COLOR, justify="center")
-    label_output.grid(row=5, column=0, sticky="ew", padx=20, pady=10)
-
-    # Tlačidlá
-    btnf = tk.Frame(frame, bg=BG_COLOR)
-    btnf.grid(row=6, column=0, pady=(10,0))
-    tk.Button(btnf, text="Zobraziť gramatiku",
-              command=lambda: generate_grammar(entry_start, entry_rules, label_output),
-              font=BUTTON_FONT, bg=BUTTON_BG, fg=BUTTON_FG).pack(pady=5)
-    tk.Button(btnf, text="Späť",
-              command=lambda: show_frame(frame_main, [entry_start, entry_rules]),
-              font=BUTTON_FONT, bg=BUTTON_BG, fg=BUTTON_FG).pack(pady=5)
-
-# Inicializácia rámov
 setup_main_frame()
 setup_grammar_frame(frame_grammar1, "Zadávanie gramatiky G1")
 setup_grammar_frame(frame_grammar2, "Zadávanie gramatiky G2")
-show_frame(frame_main)
 
+show_frame(frame_main)
 root.mainloop()
