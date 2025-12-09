@@ -664,7 +664,7 @@ def test_equivalence(eq_length, text_output, update_scrollbar):
             pstr = " | ".join("ε" if p == "" else p for p in prods)
             output_lines.append(f"  {lhs} -> {pstr}")
     else:
-        output_lines.append("  (žiadne pravidlá)")
+        output_lines.append("  Po optimalizácii je gramatika prázdna (žiadne pravidlá).")
 
     output_lines.append("")
     output_lines.append("Optimalizovaná gramatika G2:")
@@ -673,7 +673,7 @@ def test_equivalence(eq_length, text_output, update_scrollbar):
             pstr = " | ".join("ε" if p == "" else p for p in prods)
             output_lines.append(f"  {lhs} -> {pstr}")
     else:
-        output_lines.append("  (žiadne pravidlá)")
+        output_lines.append("  Po optimalizácii je gramatika prázdna (žiadne pravidlá).")
 
     strings1 = []
     strings2 = []
@@ -683,19 +683,26 @@ def test_equivalence(eq_length, text_output, update_scrollbar):
         output_lines.append(f"Reťazce jazyka G1 do dĺžky {eq_length}:")
         if final1:
             strings1 = generate_strings_up_to_length(final1, start1_opt, eq_length)
-            s1 = ", ".join("ε" if s == "" else s for s in strings1) or "(žiadne)"
-            output_lines.append("  " + s1)
+            if not strings1:
+                strings1 = []
         else:
-            output_lines.append("  (žiadne)")
+            # prázdna gramatika -> podľa zadania generuje len prázdne slovo
+            strings1 = [""]
+
+        s1 = ", ".join("()" if s == "" else s for s in strings1) or "(žiadne)"
+        output_lines.append("  " + s1)
 
         output_lines.append("")
         output_lines.append(f"Reťazce jazyka G2 do dĺžky {eq_length}:")
         if final2:
             strings2 = generate_strings_up_to_length(final2, start2_opt, eq_length)
-            s2 = ", ".join("ε" if s == "" else s for s in strings2) or "(žiadne)"
-            output_lines.append("  " + s2)
+            if not strings2:
+                strings2 = []
         else:
-            output_lines.append("  (žiadne)")
+            strings2 = [""]
+
+        s2 = ", ".join("()" if s == "" else s for s in strings2) or "(žiadne)"
+        output_lines.append("  " + s2)
 
         set1 = set(strings1)
         set2 = set(strings2)
@@ -709,14 +716,7 @@ def test_equivalence(eq_length, text_output, update_scrollbar):
             output_lines.append(
                 f"Výsledok: pre dĺžky ≤ {eq_length} NIE sú jazyky G1 a G2 ekvivalentné."
             )
-            only1 = sorted(set1 - set2, key=lambda x: (len(x), x))
-            only2 = sorted(set2 - set1, key=lambda x: (len(x), x))
-            if only1:
-                sample1 = ", ".join("ε" if s == "" else s for s in only1[:10])
-                output_lines.append("  Príklady reťazcov len z G1: " + sample1)
-            if only2:
-                sample2 = ", ".join("ε" if s == "" else s for s in only2[:10])
-                output_lines.append("  Príklady reťazcov len z G2: " + sample2)
+            # už NEvypisujeme príklady len z G1/G2
     else:
         output_lines.append("")
         output_lines.append(
@@ -789,7 +789,7 @@ def setup_grammar1_frame(frame):
     entry_start = tk.Entry(frame_inputs, font=ENTRY_FONT)
     entry_start.grid(row=0, column=1, pady=5, padx=10, sticky="ew")
 
-    # L - môžeš používať ako pomocnú info (momentálne sa v logike nepoužíva)
+    # L - len informačne, nevyužíva sa v logike
     tk.Label(frame_inputs, text="L -", font=LABEL_FONT,
              bg=BG_COLOR, fg=TEXT_COLOR).grid(row=1, column=0, pady=5, sticky="w")
     entry_len = tk.Entry(frame_inputs, font=ENTRY_FONT)
