@@ -6,6 +6,10 @@ import re
 g1_data = {}
 g2_data = {}
 
+# --- NOVÉ: referencie na vstupné polia, aby sa dali resetnúť ---
+g1_inputs = {}
+g2_inputs = {}
+
 
 ### VŠEOBECNÉ FUNKCIE ###
 
@@ -18,6 +22,42 @@ def show_frame(frame, clear_inputs=None):
             elif isinstance(entry, tk.Text):
                 entry.delete("1.0", tk.END)
     frame.tkraise()
+
+
+def _clear_widget(w):
+    if w is None:
+        return
+    if isinstance(w, tk.Entry):
+        w.delete(0, tk.END)
+    elif isinstance(w, tk.Text):
+        w.delete("1.0", tk.END)
+
+
+def reset_all_user_inputs():
+    """
+    NOVÉ:
+    Resetuje všetky polia, ktoré môže používateľ vyplňovať (G1 aj G2),
+    a vymaže uložené dáta g1_data/g2_data.
+    Volaj len keď chceš začať úplne nový test.
+    """
+    g1_data.clear()
+    g2_data.clear()
+
+    for w in g1_inputs.values():
+        _clear_widget(w)
+    for w in g2_inputs.values():
+        _clear_widget(w)
+
+    # voliteľne vymažeme aj výsledok (nie je to user-input, ale je to praktické)
+    if "result_text_output" in globals():
+        try:
+            result_text_output.config(state="normal")
+            result_text_output.delete("1.0", tk.END)
+            result_text_output.config(state="disabled")
+            if "result_update_scrollbar" in globals():
+                result_update_scrollbar()
+        except Exception:
+            pass
 
 
 ### FUNKCIE PRE PRÁCU S GRAMATIKOU ###
@@ -201,13 +241,23 @@ def remove_epsilon_productions(grammar, start_symbol, epsilon_nt):
 def create_new_start_symbol_if_epsilon(final_grammar, original_start, epsilon_nt):
     """
     Ak je pôvodný štartovací symbol ε-tvorivý,
-    pridá sa nový štartovací symbol S' s pravidlami:
-       S' -> original_start  |  ε
+    pridá sa nový štartovací symbol S' s pravidlom:
+       S' -> original_start
+    (bez ε-pravidla). Z pôvodného štartu sa prípadné ε ešte pre istotu odstráni.
     """
     if original_start in epsilon_nt and original_start in final_grammar:
         new_start = original_start + "'"
-        final_grammar[new_start] = [original_start, ""]
+
+        # pre istotu odstránime ε aj zo starého štartu (ak by sa tam niekde objavilo)
+        final_grammar[original_start] = [
+            p for p in final_grammar[original_start] if p != ""
+        ]
+
+        # nový štart bez epsilonového pravidla
+        final_grammar[new_start] = [original_start]
+
         return final_grammar, new_start
+
     return final_grammar, original_start
 
 
@@ -686,7 +736,6 @@ def test_equivalence(eq_length, text_output, update_scrollbar):
             if not strings1:
                 strings1 = []
         else:
-            # prázdna gramatika -> podľa zadania generuje len prázdne slovo
             strings1 = [""]
 
         s1 = ", ".join("()" if s == "" else s for s in strings1) or "(žiadne)"
@@ -716,7 +765,6 @@ def test_equivalence(eq_length, text_output, update_scrollbar):
             output_lines.append(
                 f"Výsledok: pre dĺžky ≤ {eq_length} NIE sú jazyky G1 a G2 ekvivalentné."
             )
-            # už NEvypisujeme príklady len z G1/G2
     else:
         output_lines.append("")
         output_lines.append(
@@ -756,10 +804,12 @@ def setup_main_frame():
 
     btn_frame = tk.Frame(frame_main, bg=BG_COLOR)
     btn_frame.grid(row=1, column=0, pady=(10, 0), sticky="n")
+
+    # NOVÉ: Začať vždy resetne všetky user-input polia
     tk.Button(
         btn_frame,
         text="Začať",
-        command=lambda: show_frame(frame_grammar1),
+        command=lambda: (reset_all_user_inputs(), show_frame(frame_grammar1)),
         font=BUTTON_FONT,
         width=20,
         height=2,
@@ -769,6 +819,8 @@ def setup_main_frame():
 
 
 def setup_grammar1_frame(frame):
+    global g1_inputs
+
     frame.grid_rowconfigure(0, weight=0)
     frame.grid_rowconfigure(1, weight=0)
     frame.grid_rowconfigure(2, weight=1)
@@ -803,6 +855,13 @@ def setup_grammar1_frame(frame):
 
     frame_inputs.grid_columnconfigure(1, weight=1)
 
+    # Uložíme referencie pre reset
+    g1_inputs = {
+        "start": entry_start,
+        "len": entry_len,
+        "rules": entry_rules
+    }
+
     frame_buttons = tk.Frame(frame, bg=BG_COLOR)
     frame_buttons.grid(row=3, column=0, pady=(10, 0), sticky="n")
 
@@ -825,6 +884,7 @@ def setup_grammar1_frame(frame):
     tk.Button(
         frame_buttons,
         text="Späť",
+        # nechávam pôvodné správanie: keď ideš späť na main z G1, tak sa to vymaže
         command=lambda: show_frame(frame_main, [entry_start, entry_len, entry_rules]),
         font=BUTTON_FONT,
         bg=BUTTON_BG,
@@ -833,6 +893,8 @@ def setup_grammar1_frame(frame):
 
 
 def setup_grammar2_frame(frame):
+    global g2_inputs
+
     frame.grid_rowconfigure(0, weight=0)
     frame.grid_rowconfigure(1, weight=0)
     frame.grid_rowconfigure(2, weight=1)
@@ -870,6 +932,14 @@ def setup_grammar2_frame(frame):
 
     frame_inputs.grid_columnconfigure(1, weight=1)
 
+    # Uložíme referencie pre reset
+    g2_inputs = {
+        "start": entry_start,
+        "len": entry_len,
+        "rules": entry_rules,
+        "eq_len": entry_eq_len
+    }
+
     frame_buttons = tk.Frame(frame, bg=BG_COLOR)
     frame_buttons.grid(row=3, column=0, pady=(10, 0), sticky="n")
 
@@ -904,6 +974,7 @@ def setup_grammar2_frame(frame):
     tk.Button(
         frame_buttons,
         text="Späť",
+        # Dôležité: späť z G2 na G1 nechá G1 tak, ako bol (G2 polia vyčistíme ako doteraz)
         command=lambda: show_frame(
             frame_grammar1, [entry_start, entry_len, entry_rules, entry_eq_len]
         ),
@@ -977,7 +1048,8 @@ def setup_result_frame(frame):
     tk.Button(
         frame_buttons,
         text="Späť na začiatok",
-        command=lambda: show_frame(frame_main),
+        # NOVÉ: po teste resetneme všetky user-input polia, aby ďalší test začínal prázdny
+        command=lambda: (reset_all_user_inputs(), show_frame(frame_main)),
         font=BUTTON_FONT,
         bg=BUTTON_BG,
         fg=BUTTON_FG,
