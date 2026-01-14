@@ -6,21 +6,15 @@ import re
 g1_data = {}
 g2_data = {}
 
-# --- NOVÉ: referencie na vstupné polia, aby sa dali resetnúť ---
+# referencie na vstupné polia, aby sa dali resetnúť
 g1_inputs = {}
 g2_inputs = {}
+common_inputs = {}  # napr. L_test
 
 
 ### VŠEOBECNÉ FUNKCIE ###
 
-def show_frame(frame, clear_inputs=None):
-    """Zobrazí daný rám a voliteľne vymaže vstupné polia."""
-    if clear_inputs:
-        for entry in clear_inputs:
-            if isinstance(entry, tk.Entry):
-                entry.delete(0, tk.END)
-            elif isinstance(entry, tk.Text):
-                entry.delete("1.0", tk.END)
+def show_frame(frame):
     frame.tkraise()
 
 
@@ -34,12 +28,6 @@ def _clear_widget(w):
 
 
 def reset_all_user_inputs():
-    """
-    NOVÉ:
-    Resetuje všetky polia, ktoré môže používateľ vyplňovať (G1 aj G2),
-    a vymaže uložené dáta g1_data/g2_data.
-    Volaj len keď chceš začať úplne nový test.
-    """
     g1_data.clear()
     g2_data.clear()
 
@@ -47,8 +35,9 @@ def reset_all_user_inputs():
         _clear_widget(w)
     for w in g2_inputs.values():
         _clear_widget(w)
+    for w in common_inputs.values():
+        _clear_widget(w)
 
-    # voliteľne vymažeme aj výsledok (nie je to user-input, ale je to praktické)
     if "result_text_output" in globals():
         try:
             result_text_output.config(state="normal")
@@ -64,9 +53,8 @@ def reset_all_user_inputs():
 
 def process_rules(rules_input):
     """
-    Spracuje vstupné pravidlá a vráti ich ako slovník: neterminál -> zoznam produkcií.
     Každý riadok: S->aAB | b
-    Pravidlo "()" sa interpretuje ako prázdny reťazec.
+    "()" sa interpretuje ako epsilon.
     """
     rules = {}
     for rule in rules_input:
@@ -79,7 +67,6 @@ def process_rules(rules_input):
 
 
 def find_simple_rules(grammar):
-    """Nájde jednoduché pravidlá A -> B, kde B je neterminál (jedno veľké písmeno)."""
     simple_rules = {}
     for A, productions in grammar.items():
         for prod in productions:
@@ -89,10 +76,6 @@ def find_simple_rules(grammar):
 
 
 def remove_simple_rules(grammar, simple_rules):
-    """
-    Odstráni jednoduché pravidlá A->B a pridá nové podľa pravidla:
-    ak A->B a B->γ, tak A->γ.
-    """
     new_grammar = {key: set(value) for key, value in grammar.items()}
     changed = True
     while changed:
@@ -110,17 +93,14 @@ def remove_simple_rules(grammar, simple_rules):
         new_grammar[A] = {p for p in new_grammar[A]
                           if not (len(p) == 1 and p.isupper())}
 
-    final_grammar = {A: list(v) for A, v in new_grammar.items()}
-    return final_grammar
+    return {A: list(v) for A, v in new_grammar.items()}
 
 
 def canonical_form(prod):
-    """Každý neterminál (veľké písmeno s voliteľným apostrofom) nahradí symbolom N."""
     return re.sub(r"[A-Z](')?", "N", prod)
 
 
 def merge_equivalent_non_terminals_once(grammar, original_nonterminals):
-    """Jedna iterácia zlúčenia ekvivalentných neterminálov podľa canonical formy."""
     reverse_grammar = {}
     for nt, productions in grammar.items():
         canon_prods = sorted(canonical_form(p) for p in productions)
@@ -132,7 +112,6 @@ def merge_equivalent_non_terminals_once(grammar, original_nonterminals):
 
     for nts in reverse_grammar.values():
         if len(nts) > 1:
-            # preferujeme pôvodné neterminály
             candidates = [nt for nt in nts if nt in original_nonterminals]
             winner = candidates[0] if candidates else nts[0]
             for nt in nts:
@@ -141,17 +120,13 @@ def merge_equivalent_non_terminals_once(grammar, original_nonterminals):
                 if nt in merged_grammar:
                     del merged_grammar[nt]
                 for A in list(merged_grammar.keys()):
-                    new_prods = []
-                    for p in merged_grammar[A]:
-                        new_prods.append(p.replace(nt, winner))
-                    merged_grammar[A] = new_prods
+                    merged_grammar[A] = [p.replace(nt, winner) for p in merged_grammar[A]]
             changed = True
 
     return merged_grammar, changed
 
 
 def merge_equivalent_non_terminals_fixpoint(grammar, original_nonterminals):
-    """Opakovane volá merge_equivalent_non_terminals_once, kým sa nedosiahne fixpoint."""
     changed = True
     current = grammar
     while changed:
@@ -163,7 +138,6 @@ def merge_equivalent_non_terminals_fixpoint(grammar, original_nonterminals):
 
 
 def find_epsilon_producing(grammar, non_terminals):
-    """Nájde všetky neterminály, ktoré môžu odvodiť prázdny reťazec (ε)."""
     epsilon_nt = set()
     changed = True
     while changed:
@@ -201,13 +175,7 @@ def join_production(symbols):
 
 
 def remove_epsilon_productions(grammar, start_symbol, epsilon_nt):
-    """
-    Odstráni ε-pravidlá (A->ε) a vytvorí varianty produkcií,
-    kde sa epsilonotvorné neterminály vynechajú.
-    """
-    new_grammar = {}
-    for A in grammar.keys():
-        new_grammar[A] = set()
+    new_grammar = {A: set() for A in grammar.keys()}
 
     for A, productions in grammar.items():
         for p in productions:
@@ -228,8 +196,7 @@ def remove_epsilon_productions(grammar, start_symbol, epsilon_nt):
                 new_grammar[A].add(new_p)
 
     for A in list(new_grammar.keys()):
-        if "" in new_grammar[A]:
-            new_grammar[A].remove("")
+        new_grammar[A].discard("")
 
     final_grammar = {}
     for A, prod_set in new_grammar.items():
@@ -239,30 +206,16 @@ def remove_epsilon_productions(grammar, start_symbol, epsilon_nt):
 
 
 def create_new_start_symbol_if_epsilon(final_grammar, original_start, epsilon_nt):
-    """
-    Ak je pôvodný štartovací symbol ε-tvorivý,
-    pridá sa nový štartovací symbol S' s pravidlom:
-       S' -> original_start
-    (bez ε-pravidla). Z pôvodného štartu sa prípadné ε ešte pre istotu odstráni.
-    """
     if original_start in epsilon_nt and original_start in final_grammar:
         new_start = original_start + "'"
-
-        # pre istotu odstránime ε aj zo starého štartu (ak by sa tam niekde objavilo)
-        final_grammar[original_start] = [
-            p for p in final_grammar[original_start] if p != ""
-        ]
-
-        # nový štart bez epsilonového pravidla
+        final_grammar[original_start] = [p for p in final_grammar[original_start] if p != ""]
         final_grammar[new_start] = [original_start]
-
         return final_grammar, new_start
 
     return final_grammar, original_start
 
 
 def find_neperspektivne(grammar, non_terminals):
-    """Zistí neperspektívne (neproduktívne) neterminály."""
     productive = set()
     changed = True
     while changed:
@@ -285,7 +238,6 @@ def find_neperspektivne(grammar, non_terminals):
 
 
 def remove_unproductive(grammar, unproductive):
-    """Odstráni neperspektívne neterminály a pravidlá, ktoré ich obsahujú."""
     clean = {}
     for nt, productions in grammar.items():
         if nt in unproductive:
@@ -301,7 +253,6 @@ def remove_unproductive(grammar, unproductive):
 
 
 def find_unreachable(grammar, start_symbol, protected=set()):
-    """Zistí nedostupné neterminály zo štartovacieho symbolu."""
     if start_symbol not in grammar:
         return set(grammar.keys()) - protected
 
@@ -323,10 +274,6 @@ def find_unreachable(grammar, start_symbol, protected=set()):
 
 
 def remove_unreachable(grammar, unreachable, protected=set()):
-    """
-    Odstráni nedostupné neterminály a pravidlá, ktoré ich obsahujú,
-    ale neterminály v 'protected' ponechá.
-    """
     clean = {}
     for nt, productions in grammar.items():
         if nt in unreachable and nt not in protected:
@@ -344,11 +291,6 @@ def remove_unreachable(grammar, unreachable, protected=set()):
 ### ĽAVÁ REKURZIA ###
 
 def check_left_recursion(grammar):
-    """
-    Zisťuje ľavú rekurziu:
-      - priama: A -> Aα
-      - nepriama: A => Bα =>* Aα'
-    """
     direct = set()
     indirect = set()
 
@@ -356,10 +298,8 @@ def check_left_recursion(grammar):
         for prod in productions:
             if not prod:
                 continue
-            # priama
             if prod.startswith(A):
                 direct.add(A)
-            # nepriama: A -> Bα a z B sa vieme ľavmostne dostať k A
             elif prod[0].isupper() and not prod.startswith(A):
                 B = prod[0]
                 if leads_leftmost_to_A(A, B, grammar):
@@ -390,10 +330,6 @@ def leads_leftmost_to_A(current, target, grammar, visited=None):
 
 
 def remove_direct_left_recursion_for(ordered_nonterminals, grammar, orig_start):
-    """
-    Odstráni priamu ľavú rekurziu pre dané neterminály.
-    Ak ide o štartovací symbol, môže vytvoriť nový neterminál Z.
-    """
     for nt in ordered_nonterminals:
         if nt not in grammar:
             continue
@@ -430,11 +366,7 @@ def remove_direct_left_recursion_for(ordered_nonterminals, grammar, orig_start):
             grammar[candidate] = new_alpha
 
 
-def remove_indirect_left_recursion_bottom_up(grammar, ordered_nonterminals,
-                                             orig_start, direct):
-    """
-    Odstráni nepriamu ľavú rekurziu zdola nahor.
-    """
+def remove_indirect_left_recursion_bottom_up(grammar, ordered_nonterminals, orig_start, direct):
     G = {A: list(prods) for A, prods in grammar.items()}
 
     if direct:
@@ -464,67 +396,9 @@ def remove_indirect_left_recursion_bottom_up(grammar, ordered_nonterminals,
     return G
 
 
-def merge_new_with_original(grammar, original_nonterminals):
-    """
-    pre nové neterminály hľadá ekvivalentný pôvodný a premenováva ich.
-    """
-    new_grammar = dict(grammar)
-
-    for nt in list(new_grammar.keys()):
-        if nt in original_nonterminals:
-            continue
-        canon_nt = sorted(canonical_form(p) for p in new_grammar[nt])
-        for old_nt in original_nonterminals:
-            if old_nt in new_grammar:
-                canon_old = sorted(canonical_form(p) for p in new_grammar[old_nt])
-                if canon_nt == canon_old:
-                    new_grammar = force_rename_new_to_old(new_grammar, old_nt, nt)
-                    break
-
-    return new_grammar
-
-
-def merge_new_with_original_fixpoint(grammar, original_nonterminals):
-    changed = True
-    current = grammar
-    while changed:
-        new_grammar = merge_new_with_original(current, original_nonterminals)
-        if new_grammar == current:
-            changed = False
-        else:
-            current = new_grammar
-            changed = True
-    return current
-
-
-def force_rename_new_to_old(grammar, old_nt, new_nt):
-    """
-    Vo všetkých produkciách nahradí výskyty new_nt za old_nt a new_nt odstráni.
-    """
-    if new_nt not in grammar or old_nt not in grammar:
-        return grammar
-
-    new_grammar = dict(grammar)
-
-    for A in list(new_grammar.keys()):
-        new_prods = []
-        for p in new_grammar[A]:
-            new_prods.append(p.replace(new_nt, old_nt))
-        new_grammar[A] = new_prods
-
-    if new_nt in new_grammar:
-        del new_grammar[new_nt]
-
-    return new_grammar
-
-
 ### GENEROVANIE REŤAZCOV ###
 
 def generate_strings_up_to_length(grammar, start_symbol, max_length):
-    """
-    Vygeneruje všetky terminálne reťazce jazyka gramatiky `grammar`
-    so štartom `start_symbol` a dĺžkou <= max_length.
-    """
     if start_symbol not in grammar:
         return []
 
@@ -607,13 +481,9 @@ def generate_strings_up_to_length(grammar, start_symbol, max_length):
     return sorted(all_strings, key=lambda x: (len(x), x))
 
 
-### HLAVNÁ FUNKCIA NA OPTIMALIZÁCIU GRAMATIKY ###
+### OPTIMALIZÁCIA ###
 
 def optimize_grammar(start_symbol, rules_input):
-    """
-    Vstup: počiatočný symbol a zoznam riadkov pravidiel.
-    Výstup: (final_grammar, new_start_symbol) po všetkých krokoch optimalizácie.
-    """
     original_grammar = process_rules(rules_input)
     original_non_terminals = list(original_grammar.keys())
 
@@ -666,7 +536,6 @@ def optimize_grammar(start_symbol, rules_input):
         direct_rec = set()
         direct = False
 
-    # neperspektívne a nedostupné
     protected = {new_start_symbol}
     unproductive = find_neperspektivne(grammar_left, original_non_terminals)
     grammar_prod = remove_unproductive(grammar_left, unproductive)
@@ -679,103 +548,65 @@ def optimize_grammar(start_symbol, rules_input):
     return final_grammar, new_start_symbol
 
 
-def test_equivalence(eq_length, text_output, update_scrollbar):
-    """
-    Spraví optimalizáciu G1 a G2, vygeneruje reťazce do dĺžky eq_length
-    a vypíše výsledok do text_output.
-    """
+def build_result_text(eq_length):
     start1 = g1_data.get("start")
     rules1 = g1_data.get("rules_lines", [])
     start2 = g2_data.get("start")
     rules2 = g2_data.get("rules_lines", [])
 
-    output_lines = []
+    lines = []
 
     if not start1 or not rules1:
-        output_lines.append("Gramatika G1 nie je úplne zadaná.")
+        lines.append("Gramatika G1 nie je úplne zadaná.")
     if not start2 or not rules2:
-        output_lines.append("Gramatika G2 nie je úplne zadaná.")
+        lines.append("Gramatika G2 nie je úplne zadaná.")
+    if eq_length is None:
+        lines.append("L_test nie je zadané alebo je neplatné číslo.")
 
-    if output_lines:
-        text_output.config(state="normal")
-        text_output.delete("1.0", tk.END)
-        text_output.insert("1.0", "\n".join(output_lines))
-        text_output.config(state="disabled")
-        update_scrollbar()
-        return
+    if lines:
+        return "\n".join(lines)
 
     final1, start1_opt = optimize_grammar(start1, rules1)
     final2, start2_opt = optimize_grammar(start2, rules2)
 
-    # Optimalizované gramatiky
-    output_lines.append("Optimalizovaná gramatika G1:")
+    lines.append("Optimalizovaná gramatika G1:")
     if final1:
         for lhs, prods in final1.items():
             pstr = " | ".join("ε" if p == "" else p for p in prods)
-            output_lines.append(f"  {lhs} -> {pstr}")
+            lines.append(f"  {lhs} -> {pstr}")
     else:
-        output_lines.append("  Po optimalizácii je gramatika prázdna (žiadne pravidlá).")
+        lines.append("  (prázdna)")
 
-    output_lines.append("")
-    output_lines.append("Optimalizovaná gramatika G2:")
+    lines.append("")
+    lines.append("Optimalizovaná gramatika G2:")
     if final2:
         for lhs, prods in final2.items():
             pstr = " | ".join("ε" if p == "" else p for p in prods)
-            output_lines.append(f"  {lhs} -> {pstr}")
+            lines.append(f"  {lhs} -> {pstr}")
     else:
-        output_lines.append("  Po optimalizácii je gramatika prázdna (žiadne pravidlá).")
+        lines.append("  (prázdna)")
 
-    strings1 = []
-    strings2 = []
-
-    if eq_length is not None:
-        output_lines.append("")
-        output_lines.append(f"Reťazce jazyka G1 do dĺžky {eq_length}:")
-        if final1:
-            strings1 = generate_strings_up_to_length(final1, start1_opt, eq_length)
-            if not strings1:
-                strings1 = []
-        else:
-            strings1 = [""]
-
-        s1 = ", ".join("()" if s == "" else s for s in strings1) or "(žiadne)"
-        output_lines.append("  " + s1)
-
-        output_lines.append("")
-        output_lines.append(f"Reťazce jazyka G2 do dĺžky {eq_length}:")
-        if final2:
-            strings2 = generate_strings_up_to_length(final2, start2_opt, eq_length)
-            if not strings2:
-                strings2 = []
-        else:
-            strings2 = [""]
-
-        s2 = ", ".join("()" if s == "" else s for s in strings2) or "(žiadne)"
-        output_lines.append("  " + s2)
-
-        set1 = set(strings1)
-        set2 = set(strings2)
-
-        output_lines.append("")
-        if set1 == set2:
-            output_lines.append(
-                f"Výsledok: pre dĺžky ≤ {eq_length} sú jazyky G1 a G2 ekvivalentné."
-            )
-        else:
-            output_lines.append(
-                f"Výsledok: pre dĺžky ≤ {eq_length} NIE sú jazyky G1 a G2 ekvivalentné."
-            )
+    # porovnanie jazykov do dĺžky eq_length
+    if final1:
+        strings1 = generate_strings_up_to_length(final1, start1_opt, eq_length)
     else:
-        output_lines.append("")
-        output_lines.append(
-            "Testovacia dĺžka (L_test) nebola zadaná – reťazce jazyka sa negenerovali."
-        )
+        strings1 = [""]
 
-    text_output.config(state="normal")
-    text_output.delete("1.0", tk.END)
-    text_output.insert("1.0", "\n".join(output_lines))
-    text_output.config(state="disabled")
-    update_scrollbar()
+    if final2:
+        strings2 = generate_strings_up_to_length(final2, start2_opt, eq_length)
+    else:
+        strings2 = [""]
+
+    set1 = set(strings1)
+    set2 = set(strings2)
+
+    lines.append("")
+    if set1 == set2:
+        lines.append(f"Výsledok: pre dĺžky ≤ {eq_length} sú jazyky G1 a G2 ekvivalentné.")
+    else:
+        lines.append(f"Výsledok: pre dĺžky ≤ {eq_length} NIE sú jazyky G1 a G2 ekvivalentné.")
+
+    return "\n".join(lines)
 
 
 ### GUI NASTAVENIA ###
@@ -790,166 +621,118 @@ ENTRY_FONT = ("Arial", 14)
 BUTTON_FONT = ("Arial", 16)
 
 
-def setup_main_frame():
-    frame_main.grid_rowconfigure(0, weight=0)
-    frame_main.grid_rowconfigure(1, weight=1)
-    frame_main.grid_columnconfigure(0, weight=1)
+def setup_start_frame(frame):
+    frame.grid_rowconfigure(0, weight=1)
+    frame.grid_rowconfigure(1, weight=0)
+    frame.grid_rowconfigure(2, weight=1)
+    frame.grid_columnconfigure(0, weight=1)
 
-    title_frame = tk.Frame(frame_main, bg=BG_COLOR)
-    title_frame.grid(row=0, column=0, pady=(40, 20), sticky="n")
-    tk.Label(title_frame, text="Testovanie ekvivalencie", font=TITLE_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).pack()
-    tk.Label(title_frame, text="dvoch bezkontextových gramatík", font=TITLE_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).pack()
+    tk.Label(
+        frame,
+        text="Testovanie ekvivalencie dvoch bezkontextových gramatík",
+        font=TITLE_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).grid(row=0, column=0, pady=(40, 10))
 
-    btn_frame = tk.Frame(frame_main, bg=BG_COLOR)
-    btn_frame.grid(row=1, column=0, pady=(10, 0), sticky="n")
-
-    # NOVÉ: Začať vždy resetne všetky user-input polia
     tk.Button(
-        btn_frame,
-        text="Začať",
-        command=lambda: (reset_all_user_inputs(), show_frame(frame_grammar1)),
+        frame,
+        text="Start",
         font=BUTTON_FONT,
-        width=20,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+        width=18,
         height=2,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
-    ).pack(pady=5)
+        command=lambda: (reset_all_user_inputs(), show_frame(frame_input), g1_inputs["start"].focus_set())
+    ).grid(row=1, column=0, pady=10)
 
 
-def setup_grammar1_frame(frame):
-    global g1_inputs
+def setup_input_frame(frame):
+    global g1_inputs, g2_inputs, common_inputs
 
-    frame.grid_rowconfigure(0, weight=0)
-    frame.grid_rowconfigure(1, weight=0)
-    frame.grid_rowconfigure(2, weight=1)
-    frame.grid_rowconfigure(3, weight=0)
+    frame.grid_rowconfigure(0, weight=0)  # title
+    frame.grid_rowconfigure(1, weight=1)  # blocks
+    frame.grid_rowconfigure(2, weight=0)  # controls
     frame.grid_columnconfigure(0, weight=1)
 
-    tk.Label(frame, text="Zadávanie gramatiky G1", font=TITLE_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(
-        row=0, column=0, pady=(10, 5), sticky="n"
-    )
+    tk.Label(
+        frame,
+        text="Zadávanie gramatík",
+        font=TITLE_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).grid(row=0, column=0, pady=(15, 5))
 
-    frame_inputs = tk.Frame(frame, bg=BG_COLOR)
-    frame_inputs.grid(row=1, column=0, pady=(5, 10), sticky="n")
+    blocks = tk.Frame(frame, bg=BG_COLOR)
+    blocks.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+    blocks.grid_rowconfigure(0, weight=1)
+    blocks.grid_columnconfigure(0, weight=1)
+    blocks.grid_columnconfigure(1, weight=1)
 
-    # S - štart
-    tk.Label(frame_inputs, text="S -", font=LABEL_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=0, column=0, pady=5, sticky="w")
-    entry_start = tk.Entry(frame_inputs, font=ENTRY_FONT)
-    entry_start.grid(row=0, column=1, pady=5, padx=10, sticky="ew")
+    # --- G1 ---
+    g1_frame = tk.LabelFrame(blocks, text="Gramatika G1", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)
+    g1_frame.grid(row=0, column=0, padx=(0, 10), sticky="nsew")
+    g1_frame.grid_rowconfigure(1, weight=1)
+    g1_frame.grid_columnconfigure(1, weight=1)
 
-    # L - len informačne, nevyužíva sa v logike
-    tk.Label(frame_inputs, text="L -", font=LABEL_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=1, column=0, pady=5, sticky="w")
-    entry_len = tk.Entry(frame_inputs, font=ENTRY_FONT)
-    entry_len.grid(row=1, column=1, pady=5, padx=10, sticky="ew")
+    tk.Label(g1_frame, text="S -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)\
+        .grid(row=0, column=0, pady=5, padx=10, sticky="w")
+    g1_start = tk.Entry(g1_frame, font=ENTRY_FONT)
+    g1_start.grid(row=0, column=1, pady=5, padx=10, sticky="ew")
 
-    # P - pravidlá
-    tk.Label(frame_inputs, text="P -", font=LABEL_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=2, column=0, pady=5, sticky="nw")
-    entry_rules = tk.Text(frame_inputs, width=40, height=6, font=ENTRY_FONT)
-    entry_rules.grid(row=2, column=1, pady=5, padx=10, sticky="ew")
+    tk.Label(g1_frame, text="P -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)\
+        .grid(row=1, column=0, pady=5, padx=10, sticky="nw")
+    # kratšie
+    g1_rules = tk.Text(g1_frame, font=ENTRY_FONT, height=8, wrap="word")
+    g1_rules.grid(row=1, column=1, pady=5, padx=10, sticky="nsew")
 
-    frame_inputs.grid_columnconfigure(1, weight=1)
+    # --- G2 ---
+    g2_frame = tk.LabelFrame(blocks, text="Gramatika G2", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)
+    g2_frame.grid(row=0, column=1, padx=(10, 0), sticky="nsew")
+    g2_frame.grid_rowconfigure(1, weight=1)
+    g2_frame.grid_columnconfigure(1, weight=1)
 
-    # Uložíme referencie pre reset
-    g1_inputs = {
-        "start": entry_start,
-        "len": entry_len,
-        "rules": entry_rules
-    }
+    tk.Label(g2_frame, text="S -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)\
+        .grid(row=0, column=0, pady=5, padx=10, sticky="w")
+    g2_start = tk.Entry(g2_frame, font=ENTRY_FONT)
+    g2_start.grid(row=0, column=1, pady=5, padx=10, sticky="ew")
 
-    frame_buttons = tk.Frame(frame, bg=BG_COLOR)
-    frame_buttons.grid(row=3, column=0, pady=(10, 0), sticky="n")
+    tk.Label(g2_frame, text="P -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)\
+        .grid(row=1, column=0, pady=5, padx=10, sticky="nw")
+    # kratšie
+    g2_rules = tk.Text(g2_frame, font=ENTRY_FONT, height=8, wrap="word")
+    g2_rules.grid(row=1, column=1, pady=5, padx=10, sticky="nsew")
 
-    def on_next():
-        g1_data["start"] = entry_start.get().strip()
-        rules_text = entry_rules.get("1.0", tk.END).strip()
-        g1_data["rules_lines"] = rules_text.split("\n") if rules_text else []
-        g1_data["length_hint"] = entry_len.get().strip()
-        show_frame(frame_grammar2)
+    # uložíme referencie pre reset
+    g1_inputs = {"start": g1_start, "rules": g1_rules}
+    g2_inputs = {"start": g2_start, "rules": g2_rules}
 
-    tk.Button(
-        frame_buttons,
-        text="Ďalej (G2)",
-        command=on_next,
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
-    ).pack(pady=5)
+    # --- CONTROLS: L_test nad tlačidlami ---
+    controls = tk.Frame(frame, bg=BG_COLOR)
+    controls.grid(row=2, column=0, pady=(0, 15), sticky="ew")
+    controls.grid_columnconfigure(0, weight=1)
+    controls.grid_columnconfigure(1, weight=0)
+    controls.grid_columnconfigure(2, weight=1)
 
-    tk.Button(
-        frame_buttons,
-        text="Späť",
-        # nechávam pôvodné správanie: keď ideš späť na main z G1, tak sa to vymaže
-        command=lambda: show_frame(frame_main, [entry_start, entry_len, entry_rules]),
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
-    ).pack(pady=5)
+    middle = tk.Frame(controls, bg=BG_COLOR)
+    middle.grid(row=0, column=1)
 
+    tk.Label(middle, text="L_test -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)\
+        .grid(row=0, column=0, padx=(0, 10), pady=(5, 2), sticky="e")
 
-def setup_grammar2_frame(frame):
-    global g2_inputs
-
-    frame.grid_rowconfigure(0, weight=0)
-    frame.grid_rowconfigure(1, weight=0)
-    frame.grid_rowconfigure(2, weight=1)
-    frame.grid_rowconfigure(3, weight=0)
-    frame.grid_columnconfigure(0, weight=1)
-
-    tk.Label(frame, text="Zadávanie gramatiky G2", font=TITLE_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(
-        row=0, column=0, pady=(10, 5), sticky="n"
-    )
-
-    frame_inputs = tk.Frame(frame, bg=BG_COLOR)
-    frame_inputs.grid(row=1, column=0, pady=(5, 10), sticky="n")
-
-    tk.Label(frame_inputs, text="S -", font=LABEL_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=0, column=0, pady=5, sticky="w")
-    entry_start = tk.Entry(frame_inputs, font=ENTRY_FONT)
-    entry_start.grid(row=0, column=1, pady=5, padx=10, sticky="ew")
-
-    tk.Label(frame_inputs, text="L -", font=LABEL_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=1, column=0, pady=5, sticky="w")
-    entry_len = tk.Entry(frame_inputs, font=ENTRY_FONT)
-    entry_len.grid(row=1, column=1, pady=5, padx=10, sticky="ew")
-
-    tk.Label(frame_inputs, text="P -", font=LABEL_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=2, column=0, pady=5, sticky="nw")
-    entry_rules = tk.Text(frame_inputs, width=40, height=6, font=ENTRY_FONT)
-    entry_rules.grid(row=2, column=1, pady=5, padx=10, sticky="ew")
-
-    # L_test - dĺžka, do ktorej porovnávame jazyky
-    tk.Label(frame_inputs, text="L_test -", font=LABEL_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(row=3, column=0, pady=5, sticky="w")
-    entry_eq_len = tk.Entry(frame_inputs, font=ENTRY_FONT)
-    entry_eq_len.grid(row=3, column=1, pady=5, padx=10, sticky="ew")
-
-    frame_inputs.grid_columnconfigure(1, weight=1)
-
-    # Uložíme referencie pre reset
-    g2_inputs = {
-        "start": entry_start,
-        "len": entry_len,
-        "rules": entry_rules,
-        "eq_len": entry_eq_len
-    }
-
-    frame_buttons = tk.Frame(frame, bg=BG_COLOR)
-    frame_buttons.grid(row=3, column=0, pady=(10, 0), sticky="n")
+    entry_eq = tk.Entry(middle, font=ENTRY_FONT, width=10)
+    entry_eq.grid(row=0, column=1, padx=(0, 10), pady=(5, 2), sticky="w")
 
     def on_test():
-        g2_data["start"] = entry_start.get().strip()
-        rules_text = entry_rules.get("1.0", tk.END).strip()
-        g2_data["rules_lines"] = rules_text.split("\n") if rules_text else []
-        g2_data["length_hint"] = entry_len.get().strip()
+        g1_data["start"] = g1_start.get().strip()
+        rules1_text = g1_rules.get("1.0", tk.END).strip()
+        g1_data["rules_lines"] = rules1_text.split("\n") if rules1_text else []
 
-        eq_text = entry_eq_len.get().strip()
+        g2_data["start"] = g2_start.get().strip()
+        rules2_text = g2_rules.get("1.0", tk.END).strip()
+        g2_data["rules_lines"] = rules2_text.split("\n") if rules2_text else []
+
+        eq_text = entry_eq.get().strip()
         eq_length = None
         if eq_text:
             try:
@@ -959,33 +742,45 @@ def setup_grammar2_frame(frame):
             except ValueError:
                 eq_length = None
 
-        test_equivalence(eq_length, result_text_output, result_update_scrollbar)
+        text = build_result_text(eq_length)
+
+        result_text_output.config(state="normal")
+        result_text_output.delete("1.0", tk.END)
+        result_text_output.insert("1.0", text)
+        result_text_output.config(state="disabled")
+        result_update_scrollbar()
+
         show_frame(frame_result)
 
+    btn_row = tk.Frame(middle, bg=BG_COLOR)
+    btn_row.grid(row=1, column=0, columnspan=2, pady=(8, 5))
+
     tk.Button(
-        frame_buttons,
+        btn_row,
         text="Testovať ekvivalenciu",
         command=on_test,
         font=BUTTON_FONT,
         bg=BUTTON_BG,
         fg=BUTTON_FG,
-    ).pack(pady=5)
+        width=20,
+        height=1,
+    ).grid(row=0, column=0, padx=10)
 
     tk.Button(
-        frame_buttons,
+        btn_row,
         text="Späť",
-        # Dôležité: späť z G2 na G1 nechá G1 tak, ako bol (G2 polia vyčistíme ako doteraz)
-        command=lambda: show_frame(
-            frame_grammar1, [entry_start, entry_len, entry_rules, entry_eq_len]
-        ),
+        command=lambda: show_frame(frame_start),
         font=BUTTON_FONT,
         bg=BUTTON_BG,
         fg=BUTTON_FG,
-    ).pack(pady=5)
+        width=10,
+        height=1,
+    ).grid(row=0, column=1, padx=10)
+
+    common_inputs = {"eq_len": entry_eq}
 
 
 def setup_result_frame(frame):
-    """Scéna s výsledkom testovania ekvivalencie."""
     global result_text_output, result_update_scrollbar
 
     frame.grid_rowconfigure(0, weight=0)
@@ -993,13 +788,16 @@ def setup_result_frame(frame):
     frame.grid_rowconfigure(2, weight=0)
     frame.grid_columnconfigure(0, weight=1)
 
-    tk.Label(frame, text="Výsledok testovania ekvivalencie", font=TITLE_FONT,
-             bg=BG_COLOR, fg=TEXT_COLOR).grid(
-        row=0, column=0, pady=(10, 5), sticky="n"
-    )
+    tk.Label(
+        frame,
+        text="Výsledok",
+        font=TITLE_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).grid(row=0, column=0, pady=(15, 5))
 
     output_frame = tk.Frame(frame, bg=BG_COLOR)
-    output_frame.grid(row=1, column=0, pady=10, padx=20, sticky="nsew")
+    output_frame.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
     output_frame.grid_rowconfigure(0, weight=1)
     output_frame.grid_columnconfigure(0, weight=1)
 
@@ -1009,14 +807,14 @@ def setup_result_frame(frame):
         bg=BG_COLOR,
         fg=TEXT_COLOR,
         wrap="word",
-        height=12,
+        height=18,
         borderwidth=0,
         highlightthickness=0,
+        state="disabled",
     )
     text_output.grid(row=0, column=0, sticky="nsew")
 
-    scrollbar = tk.Scrollbar(output_frame, orient="vertical",
-                             command=text_output.yview)
+    scrollbar = tk.Scrollbar(output_frame, orient="vertical", command=text_output.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")
     scrollbar.grid_remove()
 
@@ -1042,18 +840,30 @@ def setup_result_frame(frame):
 
     output_frame.bind("<Configure>", on_output_configure)
 
-    frame_buttons = tk.Frame(frame, bg=BG_COLOR)
-    frame_buttons.grid(row=2, column=0, pady=(10, 10), sticky="n")
+    btns = tk.Frame(frame, bg=BG_COLOR)
+    btns.grid(row=2, column=0, pady=(0, 15))
 
     tk.Button(
-        frame_buttons,
-        text="Späť na začiatok",
-        # NOVÉ: po teste resetneme všetky user-input polia, aby ďalší test začínal prázdny
-        command=lambda: (reset_all_user_inputs(), show_frame(frame_main)),
+        btns,
+        text="Späť na zadávanie",
+        command=lambda: show_frame(frame_input),
         font=BUTTON_FONT,
         bg=BUTTON_BG,
         fg=BUTTON_FG,
-    ).pack(pady=5)
+        width=18,
+        height=1,
+    ).grid(row=0, column=0, padx=10, pady=5)
+
+    tk.Button(
+        btns,
+        text="Na začiatok",
+        command=lambda: (reset_all_user_inputs(), show_frame(frame_start)),
+        font=BUTTON_FONT,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+        width=14,
+        height=1,
+    ).grid(row=0, column=1, padx=10, pady=5)
 
     result_text_output = text_output
     result_update_scrollbar = update_scrollbar
@@ -1063,27 +873,26 @@ def setup_result_frame(frame):
 
 root = tk.Tk()
 root.title("Testovanie")
-root.geometry("1000x650")
+# zmenšená výška okna
+root.geometry("1250x650")
+root.minsize(1100, 600)
 root.configure(bg=BG_COLOR)
 
-container = tk.Frame(root)
+container = tk.Frame(root, bg=BG_COLOR)
 container.pack(fill="both", expand=True)
 container.grid_rowconfigure(0, weight=1)
 container.grid_columnconfigure(0, weight=1)
 
-frame_main = tk.Frame(container, bg=BG_COLOR)
-frame_grammar1 = tk.Frame(container, bg=BG_COLOR)
-frame_grammar2 = tk.Frame(container, bg=BG_COLOR)
+frame_start = tk.Frame(container, bg=BG_COLOR)
+frame_input = tk.Frame(container, bg=BG_COLOR)
 frame_result = tk.Frame(container, bg=BG_COLOR)
 
-for f in (frame_main, frame_grammar1, frame_grammar2, frame_result):
+for f in (frame_start, frame_input, frame_result):
     f.grid(row=0, column=0, sticky="nsew")
 
-setup_main_frame()
+setup_start_frame(frame_start)
+setup_input_frame(frame_input)
 setup_result_frame(frame_result)
-setup_grammar1_frame(frame_grammar1)
-setup_grammar2_frame(frame_grammar2)
 
-show_frame(frame_main)
-
+show_frame(frame_start)
 root.mainloop()
