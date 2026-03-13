@@ -12,6 +12,18 @@ g2_inputs = {}
 common_inputs = {}  # napr. L_test
 
 
+### GUI NASTAVENIA ###
+
+BG_COLOR = '#d0e7f9'
+TEXT_COLOR = '#00274d'
+BUTTON_BG = '#00509e'
+BUTTON_FG = 'white'
+TITLE_FONT = ("Arial", 20, "bold")
+LABEL_FONT = ("Arial", 14)
+ENTRY_FONT = ("Arial", 14)
+BUTTON_FONT = ("Arial", 16)
+
+
 ### VŠEOBECNÉ FUNKCIE ###
 
 def show_frame(frame):
@@ -47,6 +59,175 @@ def reset_all_user_inputs():
                 result_update_scrollbar()
         except Exception:
             pass
+
+
+def normalize_start_symbol(s: str) -> str:
+    # Počiatočný symbol je case-insensitive -> uložíme ako veľké
+    return (s or "").strip().upper()
+
+
+def validate_and_parse_eq_length(eq_text: str):
+    """
+    L_test:
+      - prázdne -> 0
+      - inak musí obsahovať iba číslice (celé číslo >= 0)
+      - ak je neplatné, vráti error text
+    """
+    t = (eq_text or "").strip()
+    if not t:
+        return 0, None
+    if re.fullmatch(r"\d+", t):
+        return int(t), None
+    return 0, "• L_test môže byť prázdne alebo musí byť celé číslo (iba číslice 0–9)."
+
+
+# LHS neterminál: veľké písmená, prípadne apostrofy na konci (S, A, AB, S', A'')
+LHS_NONTERMINAL_PATTERN = re.compile(r"^[A-Z]+'*$")
+
+
+def show_error_popup(title: str, message: str):
+    """
+    Vlastné popup okno v štýle aplikácie (nie systémový messagebox).
+    """
+    popup = tk.Toplevel(root)
+    popup.title(title)
+    popup.configure(bg=BG_COLOR)
+    popup.resizable(False, False)
+
+    popup.transient(root)
+    popup.grab_set()
+
+    body = tk.Frame(popup, bg=BG_COLOR, padx=18, pady=14)
+    body.pack(fill="both", expand=True)
+
+    tk.Label(
+        body,
+        text=title,
+        font=("Arial", 16, "bold"),
+        bg=BG_COLOR,
+        fg="#b00020"
+    ).pack(anchor="w")
+
+    tk.Label(
+        body,
+        text=message,
+        font=ENTRY_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR,
+        justify="left",
+        wraplength=760
+    ).pack(anchor="w", pady=(10, 15))
+
+    btn = tk.Button(
+        body,
+        text="OK",
+        font=BUTTON_FONT,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+        width=10,
+        height=1,
+        command=popup.destroy
+    )
+    btn.pack(anchor="e")
+
+    popup.bind("<Return>", lambda e: popup.destroy())
+    popup.bind("<Escape>", lambda e: popup.destroy())
+
+    popup.update_idletasks()
+    w = popup.winfo_width()
+    h = popup.winfo_height()
+    x = root.winfo_rootx() + (root.winfo_width() // 2) - (w // 2)
+    y = root.winfo_rooty() + (root.winfo_height() // 2) - (h // 2)
+    popup.geometry(f"{w}x{h}+{x}+{y}")
+
+    popup.focus_set()
+    btn.focus_set()
+    popup.wait_window()
+
+
+def collect_rule_syntax_errors(rules_lines):
+    """
+    Skontroluje formát pravidiel v P poli.
+    Každý neprázdny riadok musí mať:
+      - obsahovať '->'
+      - LHS (pred ->) musí byť VEĽKÝ neterminál (povolené aj S', A'')
+      - RHS (za ->) nesmie byť prázdna
+      - alternatívy oddelené | nesmú byť prázdne (na epsilon používaj '()')
+    Vráti zoznam záznamov: (riadok, raw_line, reason_string)
+    """
+    errors = []
+
+    for idx, line in enumerate(rules_lines, start=1):
+        raw = line.strip()
+        if not raw:
+            continue
+
+        if "->" not in raw:
+            errors.append((idx, raw, "Chýba '->'."))
+            continue
+
+        left, right = raw.split("->", 1)
+        left = left.strip()
+        right = right.strip()
+
+        if not left:
+            errors.append((idx, raw, "Chýba ľavá strana pred '->'."))
+        elif not LHS_NONTERMINAL_PATTERN.match(left):
+            errors.append((idx, raw, "Ľavá strana musí byť VEĽKÝ neterminál (povolené aj S', A'')."))
+
+        if right == "":
+            errors.append((idx, raw, "Chýba pravá strana za '->'."))
+        else:
+            alts = [a.strip() for a in right.split("|")]
+            for a in alts:
+                if a == "":
+                    errors.append((idx, raw, "Prázdna alternatíva za '|'. Pre epsilon použi '()'."))
+
+    return errors
+
+
+def validate_all_inputs_and_collect_errors(
+    start1_raw, rules1_lines,
+    start2_raw, rules2_lines
+):
+    """
+    Nazbiera VŠETKY chyby naraz (G1, G2 + pravidlá).
+    L_test sa tu nerieši (to riešime zvlášť a pripojíme do popupu).
+    """
+    errors = []
+
+    # G1 completeness
+    if not start1_raw and not rules1_lines:
+        errors.append("• Gramatika G1 nie je úplne zadaná (chýba počiatočný symbol aj pravidlá).")
+    elif not start1_raw:
+        errors.append("• Gramatika G1 nie je úplne zadaná (chýba počiatočný symbol).")
+    elif not rules1_lines:
+        errors.append("• Gramatika G1 nie je úplne zadaná (chýbajú pravidlá).")
+
+    # G2 completeness
+    if not start2_raw and not rules2_lines:
+        errors.append("• Gramatika G2 nie je úplne zadaná (chýba počiatočný symbol aj pravidlá).")
+    elif not start2_raw:
+        errors.append("• Gramatika G2 nie je úplne zadaná (chýba počiatočný symbol).")
+    elif not rules2_lines:
+        errors.append("• Gramatika G2 nie je úplne zadaná (chýbajú pravidlá).")
+
+    # Syntax of rules (len keď používateľ niečo napísal do P)
+    if rules1_lines:
+        errs = collect_rule_syntax_errors(rules1_lines)
+        if errs:
+            preview = "\n".join([f"    Riadok {i}: {txt}\n        → {reason}" for i, txt, reason in errs[:8]])
+            more = "" if len(errs) <= 8 else f"\n    ... a ďalších {len(errs) - 8} chýb."
+            errors.append("• Pravidlá v G1 sú nesprávne zadané:\n" + preview + more)
+
+    if rules2_lines:
+        errs = collect_rule_syntax_errors(rules2_lines)
+        if errs:
+            preview = "\n".join([f"    Riadok {i}: {txt}\n        → {reason}" for i, txt, reason in errs[:8]])
+            more = "" if len(errs) <= 8 else f"\n    ... a ďalších {len(errs) - 8} chýb."
+            errors.append("• Pravidlá v G2 sú nesprávne zadané:\n" + preview + more)
+
+    return errors
 
 
 ### FUNKCIE PRE PRÁCU S GRAMATIKOU ###
@@ -548,7 +729,7 @@ def optimize_grammar(start_symbol, rules_input):
     return final_grammar, new_start_symbol
 
 
-def build_result_text(eq_length):
+def build_result_text(eq_length: int):
     start1 = g1_data.get("start")
     rules1 = g1_data.get("rules_lines", [])
     start2 = g2_data.get("start")
@@ -556,18 +737,26 @@ def build_result_text(eq_length):
 
     lines = []
 
-    if not start1 or not rules1:
-        lines.append("Gramatika G1 nie je úplne zadaná.")
-    if not start2 or not rules2:
-        lines.append("Gramatika G2 nie je úplne zadaná.")
-    if eq_length is None:
-        lines.append("L_test nie je zadané alebo je neplatné číslo.")
+    # ŠPECIÁLNY PRÍPAD:
+    # Ak ani v G1 ani v G2 nie sú zadané pravidlá, zobraz výsledok normálne (bez hlášok o neúplnosti).
+    both_rules_empty = (not rules1) and (not rules2)
 
-    if lines:
-        return "\n".join(lines)
+    if not both_rules_empty:
+        if not start1 or not rules1:
+            lines.append("Gramatika G1 nie je úplne zadaná.")
+        if not start2 or not rules2:
+            lines.append("Gramatika G2 nie je úplne zadaná.")
 
-    final1, start1_opt = optimize_grammar(start1, rules1)
-    final2, start2_opt = optimize_grammar(start2, rules2)
+        if lines:
+            return "\n".join(lines)
+
+    # Ak sú obe prázdne, tak optimalizované gramatiky budú prázdne a porovnanie prebehne normálne.
+    if both_rules_empty:
+        final1, start1_opt = {}, start1 or ""
+        final2, start2_opt = {}, start2 or ""
+    else:
+        final1, start1_opt = optimize_grammar(start1, rules1)
+        final2, start2_opt = optimize_grammar(start2, rules2)
 
     lines.append("Optimalizovaná gramatika G1:")
     if final1:
@@ -609,22 +798,13 @@ def build_result_text(eq_length):
     return "\n".join(lines)
 
 
-### GUI NASTAVENIA ###
-
-BG_COLOR = '#d0e7f9'
-TEXT_COLOR = '#00274d'
-BUTTON_BG = '#00509e'
-BUTTON_FG = 'white'
-TITLE_FONT = ("Arial", 20, "bold")
-LABEL_FONT = ("Arial", 14)
-ENTRY_FONT = ("Arial", 14)
-BUTTON_FONT = ("Arial", 16)
-
+### GUI SETUP ###
 
 def setup_start_frame(frame):
     frame.grid_rowconfigure(0, weight=1)
     frame.grid_rowconfigure(1, weight=0)
-    frame.grid_rowconfigure(2, weight=1)
+    frame.grid_rowconfigure(2, weight=0)
+    frame.grid_rowconfigure(3, weight=1)
     frame.grid_columnconfigure(0, weight=1)
 
     tk.Label(
@@ -635,8 +815,12 @@ def setup_start_frame(frame):
         fg=TEXT_COLOR
     ).grid(row=0, column=0, pady=(40, 10))
 
+    # Tlačidlá pod sebou (Start + Info)
+    btns = tk.Frame(frame, bg=BG_COLOR)
+    btns.grid(row=1, column=0, pady=10)
+
     tk.Button(
-        frame,
+        btns,
         text="Start",
         font=BUTTON_FONT,
         bg=BUTTON_BG,
@@ -644,7 +828,91 @@ def setup_start_frame(frame):
         width=18,
         height=2,
         command=lambda: (reset_all_user_inputs(), show_frame(frame_input), g1_inputs["start"].focus_set())
-    ).grid(row=1, column=0, pady=10)
+    ).grid(row=0, column=0, padx=10, pady=(0, 10))
+
+    tk.Button(
+        btns,
+        text="Info",
+        font=BUTTON_FONT,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+        width=18,
+        height=1,
+        command=lambda: show_frame(frame_info)
+    ).grid(row=1, column=0, padx=10)
+
+
+def setup_info_frame(frame):
+    frame.grid_rowconfigure(0, weight=0)
+    frame.grid_rowconfigure(1, weight=1)
+    frame.grid_rowconfigure(2, weight=0)
+    frame.grid_columnconfigure(0, weight=1)
+
+    tk.Label(
+        frame,
+        text="Info / Návod",
+        font=TITLE_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).grid(row=0, column=0, pady=(15, 5))
+
+    body = tk.Frame(frame, bg=BG_COLOR)
+    body.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+    body.grid_rowconfigure(0, weight=1)
+    body.grid_columnconfigure(0, weight=1)
+
+    info_text = (
+        "Tento program testuje ekvivalenciu dvoch bezkontextových gramatík G1 a G2.\n"
+        "Ako zadávať gramatiku:\n"
+        "1) Počiatočný symbol (S)\n"
+        "   • Neterminál nemusí byť zadaný veľkým písmenom \n"
+        "   • Povolené sú aj apostrofy, napr. S', A''.\n\n"
+        "2) Pravidlá (P -)\n"
+        "   • Každý riadok musí mať tvar:\n"
+        "       A->α | β | ...\n"
+        "   • Alternatívy oddeľuj znakom | (pipe)\n"
+        "   • Epsilon (prázdne slovo) zapisuj ako: ()\n"
+        "   • Neterminály musia byť veľké písmená\n"
+        "   • Terminály môžu byť napr. malé písmená (a, b, c, ...), číslice alebo iné znaky\n\n"
+        "3) L_test\n"
+        "   • Určuje maximálnu dĺžku reťazcov, do ktorej sa porovnávajú jazyky.\n"
+        "   • Prázdne = 0.\n"
+        "   • Inak zadaj celé číslo (napr. 5, 10, 12...).\n\n"
+    )
+
+    text_output = tk.Text(
+        body,
+        font=ENTRY_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR,
+        wrap="word",
+        borderwidth=0,
+        highlightthickness=0,
+    )
+    text_output.grid(row=0, column=0, sticky="nsew")
+    text_output.insert("1.0", info_text)
+    text_output.config(state="disabled")
+
+    scrollbar = tk.Scrollbar(body, orient="vertical", command=text_output.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    text_output.configure(yscrollcommand=scrollbar.set)
+
+    btns = tk.Frame(frame, bg=BG_COLOR)
+    btns.grid(row=2, column=0, pady=(0, 15))
+
+    tk.Button(
+        btns,
+        text="Späť",
+        command=lambda: show_frame(frame_start),
+        font=BUTTON_FONT,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+        width=12,
+        height=1,
+    ).grid(row=0, column=0, padx=10, pady=5)
+
+    # klávesové skratky
+    frame.bind_all("<Escape>", lambda e: show_frame(frame_start))
 
 
 def setup_input_frame(frame):
@@ -682,7 +950,6 @@ def setup_input_frame(frame):
 
     tk.Label(g1_frame, text="P -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)\
         .grid(row=1, column=0, pady=5, padx=10, sticky="nw")
-    # kratšie
     g1_rules = tk.Text(g1_frame, font=ENTRY_FONT, height=8, wrap="word")
     g1_rules.grid(row=1, column=1, pady=5, padx=10, sticky="nsew")
 
@@ -699,11 +966,9 @@ def setup_input_frame(frame):
 
     tk.Label(g2_frame, text="P -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)\
         .grid(row=1, column=0, pady=5, padx=10, sticky="nw")
-    # kratšie
     g2_rules = tk.Text(g2_frame, font=ENTRY_FONT, height=8, wrap="word")
     g2_rules.grid(row=1, column=1, pady=5, padx=10, sticky="nsew")
 
-    # uložíme referencie pre reset
     g1_inputs = {"start": g1_start, "rules": g1_rules}
     g2_inputs = {"start": g2_start, "rules": g2_rules}
 
@@ -724,24 +989,57 @@ def setup_input_frame(frame):
     entry_eq.grid(row=0, column=1, padx=(0, 10), pady=(5, 2), sticky="w")
 
     def on_test():
-        g1_data["start"] = g1_start.get().strip()
+        # --- načítanie vstupov ---
+        start1_raw = g1_start.get().strip()
         rules1_text = g1_rules.get("1.0", tk.END).strip()
-        g1_data["rules_lines"] = rules1_text.split("\n") if rules1_text else []
+        rules1_lines = rules1_text.split("\n") if rules1_text else []
 
-        g2_data["start"] = g2_start.get().strip()
+        start2_raw = g2_start.get().strip()
         rules2_text = g2_rules.get("1.0", tk.END).strip()
-        g2_data["rules_lines"] = rules2_text.split("\n") if rules2_text else []
+        rules2_lines = rules2_text.split("\n") if rules2_text else []
 
-        eq_text = entry_eq.get().strip()
-        eq_length = None
-        if eq_text:
-            try:
-                eq_length = int(eq_text)
-                if eq_length < 0:
-                    eq_length = None
-            except ValueError:
-                eq_length = None
+        eq_length, eq_error = validate_and_parse_eq_length(entry_eq.get())
 
+        # uloženie (start symbol case-insensitive)
+        g1_data["start"] = normalize_start_symbol(start1_raw)
+        g1_data["rules_lines"] = rules1_lines
+
+        g2_data["start"] = normalize_start_symbol(start2_raw)
+        g2_data["rules_lines"] = rules2_lines
+
+        # Ak sú pravidlá prázdne v OBOCH gramatikách -> normálny výsledok,
+        # ALE ak je L_test neplatné, ukáž popup
+        if not rules1_text and not rules2_text:
+            if eq_error:
+                show_error_popup("Chyby vo vstupe", eq_error)
+                return
+
+            text = build_result_text(eq_length)
+
+            result_text_output.config(state="normal")
+            result_text_output.delete("1.0", tk.END)
+            result_text_output.insert("1.0", text)
+            result_text_output.config(state="disabled")
+            result_update_scrollbar()
+
+            show_frame(frame_result)
+            return
+
+        # Inak: validácia (zobraz všetky chyby naraz)
+        all_errors = validate_all_inputs_and_collect_errors(
+            start1_raw, rules1_lines,
+            start2_raw, rules2_lines
+        )
+
+        # pripoj L_test chybu (ak existuje)
+        if eq_error:
+            all_errors.append(eq_error)
+
+        if all_errors:
+            show_error_popup("Chyby vo vstupe", "\n".join(all_errors))
+            return
+
+        # OK -> zobraz výsledok
         text = build_result_text(eq_length)
 
         result_text_output.config(state="normal")
@@ -846,7 +1144,7 @@ def setup_result_frame(frame):
     tk.Button(
         btns,
         text="Späť na zadávanie",
-        command=lambda: show_frame(frame_input),
+        command=lambda: (reset_all_user_inputs(), show_frame(frame_input), g1_inputs["start"].focus_set()),
         font=BUTTON_FONT,
         bg=BUTTON_BG,
         fg=BUTTON_FG,
@@ -873,7 +1171,6 @@ def setup_result_frame(frame):
 
 root = tk.Tk()
 root.title("Testovanie")
-# zmenšená výška okna
 root.geometry("1250x650")
 root.minsize(1100, 600)
 root.configure(bg=BG_COLOR)
@@ -884,13 +1181,15 @@ container.grid_rowconfigure(0, weight=1)
 container.grid_columnconfigure(0, weight=1)
 
 frame_start = tk.Frame(container, bg=BG_COLOR)
+frame_info = tk.Frame(container, bg=BG_COLOR)   # ✅ NOVÉ: Info obrazovka
 frame_input = tk.Frame(container, bg=BG_COLOR)
 frame_result = tk.Frame(container, bg=BG_COLOR)
 
-for f in (frame_start, frame_input, frame_result):
+for f in (frame_start, frame_info, frame_input, frame_result):
     f.grid(row=0, column=0, sticky="nsew")
 
 setup_start_frame(frame_start)
+setup_info_frame(frame_info)   # ✅ NOVÉ
 setup_input_frame(frame_input)
 setup_result_frame(frame_result)
 
