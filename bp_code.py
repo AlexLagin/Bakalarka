@@ -1,6 +1,7 @@
 import tkinter as tk
 import itertools
 import re
+from functools import lru_cache
 
 # Uloženie vstupov pre G1 a G2 medzi scénami
 g1_data = {}
@@ -577,11 +578,31 @@ def remove_indirect_left_recursion_bottom_up(grammar, ordered_nonterminals, orig
     return G
 
 
-### GENEROVANIE REŤAZCOV ###
+### GENEROVANIE REŤAZCOV - OPTIMALIZOVANÉ ###
 
-def generate_strings_up_to_length(grammar, start_symbol, max_length):
-    if start_symbol not in grammar:
-        return []
+def grammar_signature(grammar):
+    return tuple(
+        sorted(
+            (lhs, tuple(sorted(set(prods))))
+            for lhs, prods in grammar.items()
+        )
+    )
+
+
+def make_exact_length_engine(grammar):
+    """
+    Vráti funkciu gen_nt_exact(start_symbol, exact_length),
+    ktorá generuje iba reťazce PRESNE danej dĺžky.
+    Toto je výrazne efektívnejšie než generovať všetko do <= N
+    v každom medzistave.
+    """
+
+    # zachovanie pôvodnej funkcionality:
+    # ak je gramatika prázdna, build_result_text doteraz bral jazyk ako {epsilon}
+    if not grammar:
+        def empty_exact(start_symbol, target_len):
+            return frozenset({""}) if target_len == 0 else frozenset()
+        return empty_exact
 
     nonterminals = set(grammar.keys())
     sorted_nts = sorted(nonterminals, key=len, reverse=True)
@@ -601,65 +622,175 @@ def generate_strings_up_to_length(grammar, start_symbol, max_length):
             else:
                 tokens.append(prod[i])
                 i += 1
-        return tokens
+        return tuple(tokens)
 
-    memo_nt = {}
-    memo_seq = {}
+    tokenized = {
+        nt: [tokenize(prod) for prod in prods]
+        for nt, prods in grammar.items()
+    }
 
-    def gen_nt(nt, remaining, stack):
-        key = (nt, remaining)
-        if key in memo_nt:
-            return memo_nt[key]
-        if key in stack:
-            return set()
-        stack.add(key)
+    INF = 10**9
+
+    # minimálna dĺžka reťazca, ktorú vie neterminál odvodiť
+    min_len_nt = {nt: INF for nt in nonterminals}
+
+    changed = True
+    while changed:
+        changed = False
+        for nt, prods in tokenized.items():
+            best = min_len_nt[nt]
+
+            for tokens in prods:
+                total = 0
+                possible = True
+
+                for tok in tokens:
+                    if tok in nonterminals:
+                        v = min_len_nt[tok]
+                        if v == INF:
+                            possible = False
+                            break
+                        total += v
+                    else:
+                        total += len(tok)
+
+                if possible and total < best:
+                    best = total
+
+            if best < min_len_nt[nt]:
+                min_len_nt[nt] = best
+                changed = True
+
+    @lru_cache(maxsize=None)
+    def min_seq_len(tokens):
+        total = 0
+        for tok in tokens:
+            if tok in nonterminals:
+                v = min_len_nt[tok]
+                if v == INF:
+                    return INF
+                total += v
+            else:
+                total += len(tok)
+        return total
+
+    in_progress_nt = set()
+
+    @lru_cache(maxsize=None)
+    def gen_nt_exact(nt, target_len):
+        if nt not in tokenized:
+            return frozenset()
+
+        if target_len < 0 or min_len_nt.get(nt, INF) > target_len:
+            return frozenset()
+
+        key = (nt, target_len)
+        if key in in_progress_nt:
+            return frozenset()
+
+        in_progress_nt.add(key)
         results = set()
-        for prod in grammar.get(nt, []):
-            if prod == "":
-                if remaining >= 0:
-                    results.add("")
-                continue
-            tokens = tokenize(prod)
-            for s in gen_seq(tokens, remaining, stack):
-                if len(s) <= remaining:
-                    results.add(s)
-        stack.remove(key)
-        memo_nt[key] = results
-        return results
 
-    def gen_seq(tokens, remaining, stack):
-        key = (tuple(tokens), remaining)
-        if key in memo_seq:
-            return memo_seq[key]
-        if remaining < 0:
-            return set()
+        for tokens in tokenized[nt]:
+            results.update(gen_seq_exact(tokens, target_len))
+
+        in_progress_nt.remove(key)
+        return frozenset(results)
+
+    @lru_cache(maxsize=None)
+    def gen_seq_exact(tokens, target_len):
+        if target_len < 0:
+            return frozenset()
+
         if not tokens:
-            return {""}
-        first, *rest = tokens
-        results = set()
-        if first in nonterminals:
-            for s1 in gen_nt(first, remaining, stack):
-                rem = remaining - len(s1)
-                if rem < 0:
-                    continue
-                for s2 in gen_seq(rest, rem, stack):
-                    results.add(s1 + s2)
-        else:
-            t = first
-            if remaining < len(t):
-                memo_seq[key] = set()
-                return set()
-            for s2 in gen_seq(rest, remaining - len(t), stack):
-                results.add(t + s2)
-        memo_seq[key] = results
-        return results
+            return frozenset({""}) if target_len == 0 else frozenset()
 
+        if min_seq_len(tokens) > target_len:
+            return frozenset()
+
+        first = tokens[0]
+        rest = tokens[1:]
+        rest_min = min_seq_len(rest)
+
+        results = set()
+
+        if first in nonterminals:
+            first_min = min_len_nt[first]
+            max_first = target_len - rest_min
+
+            for left_len in range(first_min, max_first + 1):
+                left_set = gen_nt_exact(first, left_len)
+                if not left_set:
+                    continue
+
+                right_set = gen_seq_exact(rest, target_len - left_len)
+                if not right_set:
+                    continue
+
+                for left in left_set:
+                    for right in right_set:
+                        results.add(left + right)
+        else:
+            token_len = len(first)
+
+            if target_len < token_len + rest_min:
+                return frozenset()
+
+            suffixes = gen_seq_exact(rest, target_len - token_len)
+            for suffix in suffixes:
+                results.add(first + suffix)
+
+        return frozenset(results)
+
+    return gen_nt_exact
+
+
+def generate_strings_up_to_length(grammar, start_symbol, max_length):
+    """
+    Zachovaná pôvodná funkcionalita:
+    vráti všetky reťazce dĺžky <= max_length zoradené podľa (len, lexikograficky).
+    Ale interne sa už používa presná dĺžka + memoizácia + pruning.
+    """
+    if not grammar or start_symbol not in grammar:
+        return [""] if max_length >= 0 else []
+
+    gen_nt_exact = make_exact_length_engine(grammar)
     all_strings = set()
-    for s in gen_nt(start_symbol, max_length, set()):
-        if len(s) <= max_length:
-            all_strings.add(s)
+
+    for length in range(max_length + 1):
+        all_strings.update(gen_nt_exact(start_symbol, length))
 
     return sorted(all_strings, key=lambda x: (len(x), x))
+
+
+def languages_equivalent_up_to_length(grammar1, start1, grammar2, start2, max_length):
+    """
+    Porovnáva jazyky po jednotlivých dĺžkach.
+    Vie sa zastaviť hneď pri prvom rozdiele.
+    Navyše má fast-path: ak sú optimalizované gramatiky rovnaké,
+    netreba nič generovať.
+    """
+
+    # super rýchla cesta – ak sú optimalizované gramatiky rovnaké
+    if start1 == start2 and grammar_signature(grammar1) == grammar_signature(grammar2):
+        return True
+
+    # zachovanie pôvodnej funkcionality pre prázdne gramatiky
+    if not grammar1:
+        gen1 = lambda s, l: frozenset({""}) if l == 0 else frozenset()
+    else:
+        gen1 = make_exact_length_engine(grammar1)
+
+    if not grammar2:
+        gen2 = lambda s, l: frozenset({""}) if l == 0 else frozenset()
+    else:
+        gen2 = make_exact_length_engine(grammar2)
+
+    for length in range(max_length + 1):
+        if gen1(start1, length) != gen2(start2, length):
+            return False
+
+    return True
 
 
 ### OPTIMALIZÁCIA ###
@@ -775,22 +906,15 @@ def build_result_text(eq_length: int):
     else:
         lines.append("  (prázdna)")
 
-    # porovnanie jazykov do dĺžky eq_length
-    if final1:
-        strings1 = generate_strings_up_to_length(final1, start1_opt, eq_length)
-    else:
-        strings1 = [""]
-
-    if final2:
-        strings2 = generate_strings_up_to_length(final2, start2_opt, eq_length)
-    else:
-        strings2 = [""]
-
-    set1 = set(strings1)
-    set2 = set(strings2)
-
     lines.append("")
-    if set1 == set2:
+
+    equivalent = languages_equivalent_up_to_length(
+        final1, start1_opt,
+        final2, start2_opt,
+        eq_length
+    )
+
+    if equivalent:
         lines.append(f"Výsledok: pre dĺžky ≤ {eq_length} sú jazyky G1 a G2 ekvivalentné.")
     else:
         lines.append(f"Výsledok: pre dĺžky ≤ {eq_length} NIE sú jazyky G1 a G2 ekvivalentné.")
@@ -1181,7 +1305,7 @@ container.grid_rowconfigure(0, weight=1)
 container.grid_columnconfigure(0, weight=1)
 
 frame_start = tk.Frame(container, bg=BG_COLOR)
-frame_info = tk.Frame(container, bg=BG_COLOR)   # ✅ NOVÉ: Info obrazovka
+frame_info = tk.Frame(container, bg=BG_COLOR)
 frame_input = tk.Frame(container, bg=BG_COLOR)
 frame_result = tk.Frame(container, bg=BG_COLOR)
 
@@ -1189,7 +1313,7 @@ for f in (frame_start, frame_info, frame_input, frame_result):
     f.grid(row=0, column=0, sticky="nsew")
 
 setup_start_frame(frame_start)
-setup_info_frame(frame_info)   # ✅ NOVÉ
+setup_info_frame(frame_info)
 setup_input_frame(frame_input)
 setup_result_frame(frame_result)
 
