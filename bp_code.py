@@ -12,6 +12,9 @@ g1_inputs = {}
 g2_inputs = {}
 common_inputs = {}  # napr. L_test
 
+expanded_rule_sections = set()
+last_result_payload = None
+
 
 ### GUI NASTAVENIA ###
 
@@ -41,8 +44,12 @@ def _clear_widget(w):
 
 
 def reset_all_user_inputs():
+    global last_result_payload
+
     g1_data.clear()
     g2_data.clear()
+    expanded_rule_sections.clear()
+    last_result_payload = None
 
     for w in g1_inputs.values():
         _clear_widget(w)
@@ -94,9 +101,6 @@ LHS_NONTERMINAL_PATTERN = re.compile(r"^[A-Z0-9]+'*$|^[A-Z0-9][A-Z0-9]+'*$")
 
 
 def show_error_popup(title: str, message: str):
-    """
-    Vlastné popup okno v štýle aplikácie (nie systémový messagebox).
-    """
     popup = tk.Toplevel(root)
     popup.title(title)
     popup.configure(bg=BG_COLOR)
@@ -154,9 +158,6 @@ def show_error_popup(title: str, message: str):
 
 
 def show_input_help_popup():
-    """
-    Info popup pre okno Zadávanie gramatík.
-    """
     popup = tk.Toplevel(root)
     popup.title("Info")
     popup.configure(bg=BG_COLOR)
@@ -274,17 +275,6 @@ def replace_nonterminal_token(prod, old_nt, new_nt, nonterminals):
 
 
 def collect_rule_syntax_errors(rules_lines):
-    """
-    Skontroluje formát pravidiel v P poli.
-    Každý neprázdny riadok musí mať:
-      - obsahovať '->' alebo '→'
-      - LHS (pred šípkou) musí byť neterminál z veľkých písmen a/alebo číslic
-        (povolené aj apostrofy na konci)
-      - RHS (za šípkou) nesmie byť prázdna
-      - alternatívy oddelené | nesmú byť prázdne (na epsilon používaj '()')
-
-    Vráti zoznam záznamov: (riadok, reason_string)
-    """
     errors = []
 
     for idx, line in enumerate(rules_lines, start=1):
@@ -322,15 +312,9 @@ def validate_all_inputs_and_collect_errors(
     start1_raw, rules1_lines,
     start2_raw, rules2_lines
 ):
-    """
-    Nazbiera VŠETKY chyby naraz (G1, G2 + pravidlá).
-    L_test sa tu nerieši.
-    Medzi chybami G1 a G2 vloží jeden prázdny riadok.
-    """
     g1_errors = []
     g2_errors = []
 
-    # G1 completeness
     if not start1_raw and not rules1_lines:
         g1_errors.append("• Gramatika G1 nie je úplne zadaná (chýba počiatočný symbol aj pravidlá).")
     elif not start1_raw:
@@ -338,7 +322,6 @@ def validate_all_inputs_and_collect_errors(
     elif not rules1_lines:
         g1_errors.append("• Gramatika G1 nie je úplne zadaná (chýbajú pravidlá).")
 
-    # G2 completeness
     if not start2_raw and not rules2_lines:
         g2_errors.append("• Gramatika G2 nie je úplne zadaná (chýba počiatočný symbol aj pravidlá).")
     elif not start2_raw:
@@ -346,7 +329,6 @@ def validate_all_inputs_and_collect_errors(
     elif not rules2_lines:
         g2_errors.append("• Gramatika G2 nie je úplne zadaná (chýbajú pravidlá).")
 
-    # Syntax of rules - G1
     if rules1_lines:
         errs = collect_rule_syntax_errors(rules1_lines)
         if errs:
@@ -354,7 +336,6 @@ def validate_all_inputs_and_collect_errors(
             more = "" if len(errs) <= 8 else f"\n    ... a ďalších {len(errs) - 8} chýb."
             g1_errors.append("• Pravidlá v G1 sú nesprávne zadané:\n" + preview + more)
 
-    # Syntax of rules - G2
     if rules2_lines:
         errs = collect_rule_syntax_errors(rules2_lines)
         if errs:
@@ -1048,7 +1029,105 @@ def optimize_grammar(start_symbol, rules_input):
     return final_grammar, new_start_symbol
 
 
-def build_result_text(eq_length: int):
+### VÝPIS VÝSLEDKU ###
+
+def format_grouped_rule_line(lhs, prods):
+    display = ["ε" if p == "" else p for p in prods]
+    return f"  {lhs} -> " + " | ".join(display)
+
+
+def remaining_rules_text(count):
+    if count == 1:
+        return "+ 1 ďalšie pravidlo"
+    if 2 <= count <= 4:
+        return f"+ {count} ďalšie pravidlá"
+    return f"+ {count} ďalších pravidiel"
+
+
+def prepare_preview_by_nonterminal(grammar, visible_limit=7):
+    """
+    Pre každý neterminál zobrazí prvých `visible_limit` alternatív
+    a zvyšok nechá ako hidden.
+    """
+    preview = []
+
+    for lhs, prods in grammar.items():
+        shown = prods[:visible_limit]
+        hidden = prods[visible_limit:]
+
+        preview.append({
+            "lhs": lhs,
+            "shown": shown,
+            "hidden": hidden
+        })
+
+    return preview
+
+
+def show_remaining_rules_popup(title, rule_lines):
+    popup = tk.Toplevel(root)
+    popup.title(title)
+    popup.configure(bg=BG_COLOR)
+    popup.geometry("950x520")
+    popup.minsize(750, 420)
+
+    popup.transient(root)
+    popup.grab_set()
+
+    popup.grid_rowconfigure(1, weight=1)
+    popup.grid_columnconfigure(0, weight=1)
+
+    tk.Label(
+        popup,
+        text=title,
+        font=("Arial", 16, "bold"),
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 8))
+
+    body = tk.Frame(popup, bg=BG_COLOR)
+    body.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 10))
+    body.grid_rowconfigure(0, weight=1)
+    body.grid_columnconfigure(0, weight=1)
+
+    text_output = tk.Text(
+        body,
+        font=ENTRY_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR,
+        wrap="word",
+        borderwidth=0,
+        highlightthickness=0
+    )
+    text_output.grid(row=0, column=0, sticky="nsew")
+    text_output.insert("1.0", "\n".join(rule_lines))
+    text_output.config(state="disabled")
+
+    scrollbar = tk.Scrollbar(body, orient="vertical", command=text_output.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    text_output.configure(yscrollcommand=scrollbar.set)
+
+    btn = tk.Button(
+        popup,
+        text="Zavrieť",
+        font=BUTTON_FONT,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+        width=12,
+        height=1,
+        command=popup.destroy
+    )
+    btn.grid(row=2, column=0, sticky="e", padx=18, pady=(0, 14))
+
+    popup.bind("<Return>", lambda e: popup.destroy())
+    popup.bind("<Escape>", lambda e: popup.destroy())
+
+    popup.focus_set()
+    btn.focus_set()
+    popup.wait_window()
+
+
+def build_result_payload(eq_length: int):
     start1 = g1_data.get("start")
     rules1 = g1_data.get("rules_lines", [])
     start2 = g2_data.get("start")
@@ -1065,7 +1144,7 @@ def build_result_text(eq_length: int):
             lines.append("Gramatika G2 nie je úplne zadaná.")
 
         if lines:
-            return "\n".join(lines)
+            return {"plain_lines": lines}
 
     if both_rules_empty:
         final1, start1_opt = {}, start1 or ""
@@ -1074,44 +1153,180 @@ def build_result_text(eq_length: int):
         final1, start1_opt = optimize_grammar(start1, rules1)
         final2, start2_opt = optimize_grammar(start2, rules2)
 
-    lines.append("Optimalizovaná gramatika G1:")
-    if final1:
-        for lhs, prods in final1.items():
-            pstr = " | ".join("ε" if p == "" else p for p in prods)
-            lines.append(f"  {lhs} -> {pstr}")
-    else:
-        lines.append("  ∅")
-
-    lines.append("")
-    lines.append("Optimalizovaná gramatika G2:")
-    if final2:
-        for lhs, prods in final2.items():
-            pstr = " | ".join("ε" if p == "" else p for p in prods)
-            lines.append(f"  {lhs} -> {pstr}")
-    else:
-        lines.append("  ∅")
-
-    lines.append("")
-
     equivalent = languages_equivalent_up_to_length(
         final1, start1_opt,
         final2, start2_opt,
         eq_length
     )
 
-    if equivalent:
-        lines.append(f"Výsledok: pre dĺžky ≤ {eq_length} sú jazyky G1 a G2 ekvivalentné.")
-    else:
-        lines.append(f"Výsledok: pre dĺžky ≤ {eq_length} NIE sú jazyky G1 a G2 ekvivalentné.")
+    return {
+        "final1": final1,
+        "final2": final2,
+        "eq_length": eq_length,
+        "equivalent": equivalent
+    }
 
-    return "\n".join(lines)
+def split_into_chunks(items, chunk_size):
+    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def format_continuation_line(lhs, prods):
+    display = ["ε" if p == "" else p for p in prods]
+    indent = " " * (len(lhs) + 5)
+    return indent + "| " + " | ".join(display)
+
+
+def expand_rule_section(section_key):
+    if section_key not in expanded_rule_sections:
+        expanded_rule_sections.add(section_key)
+
+    if last_result_payload is not None:
+        render_result(last_result_payload)
+
+def expand_rule_section(section_key):
+    expanded_rule_sections.add(section_key)
+    if last_result_payload is not None:
+        render_result(last_result_payload)
+
+
+def collapse_rule_section(section_key):
+    expanded_rule_sections.discard(section_key)
+    if last_result_payload is not None:
+        render_result(last_result_payload)
+
+def render_result(payload):
+    global last_result_payload
+    last_result_payload = payload
+
+    result_text_output.config(state="normal")
+    result_text_output.delete("1.0", tk.END)
+    result_text_output.config(cursor="arrow")
+
+    # zmazanie starých tagov
+    for tag in result_text_output.tag_names():
+        if tag.startswith("more_"):
+            try:
+                result_text_output.tag_delete(tag)
+            except Exception:
+                pass
+
+    if "plain_lines" in payload:
+        result_text_output.insert("1.0", "\n".join(payload["plain_lines"]))
+        result_text_output.config(state="disabled")
+        result_update_scrollbar()
+        return
+
+    def insert_clickable(text, tag_name, callback):
+        result_text_output.insert(tk.END, text, (tag_name,))
+        result_text_output.tag_configure(
+            tag_name,
+            foreground=BUTTON_BG,
+            underline=False
+        )
+        result_text_output.tag_bind(
+            tag_name,
+            "<Button-1>",
+            lambda e, cb=callback: cb()
+        )
+        result_text_output.tag_bind(
+            tag_name,
+            "<Enter>",
+            lambda e: result_text_output.config(cursor="hand2")
+        )
+        result_text_output.tag_bind(
+            tag_name,
+            "<Leave>",
+            lambda e: result_text_output.config(cursor="arrow")
+        )
+
+    def insert_grammar_preview(grammar_title, grammar, tag_prefix):
+        result_text_output.insert(tk.END, grammar_title + "\n")
+
+        if not grammar:
+            result_text_output.insert(tk.END, "Po optimalizácii gramatika ostala prázdna.\n\n")
+            return
+
+        preview = prepare_preview_by_nonterminal(grammar, visible_limit=7)
+
+        for i, item in enumerate(preview):
+            lhs = item["lhs"]
+            shown = ["ε" if p == "" else p for p in item["shown"]]
+            hidden = ["ε" if p == "" else p for p in item["hidden"]]
+            hidden_count = len(hidden)
+
+            section_key = f"{tag_prefix}_{i}"
+
+            if hidden_count == 0:
+                if shown:
+                    result_text_output.insert(
+                        tk.END,
+                        f"  {lhs} -> " + " | ".join(shown) + "\n"
+                    )
+                else:
+                    result_text_output.insert(tk.END, f"  {lhs} ->\n")
+                continue
+
+            # zbalený stav
+            if section_key not in expanded_rule_sections:
+                if shown:
+                    prefix = f"  {lhs} -> " + " | ".join(shown) + " | "
+                else:
+                    prefix = f"  {lhs} -> "
+
+                result_text_output.insert(tk.END, prefix)
+
+                insert_clickable(
+                    remaining_rules_text(hidden_count),
+                    section_key,
+                    lambda key=section_key: expand_rule_section(key)
+                )
+
+                result_text_output.insert(tk.END, "\n")
+
+            # rozbalený stav
+            else:
+                all_rules = shown + hidden
+
+                if all_rules:
+                    prefix = f"  {lhs} -> " + " | ".join(all_rules) + " | "
+                else:
+                    prefix = f"  {lhs} -> "
+
+                result_text_output.insert(tk.END, prefix)
+
+                insert_clickable(
+                    "Späť",
+                    section_key,
+                    lambda key=section_key: collapse_rule_section(key)
+                )
+
+                result_text_output.insert(tk.END, "\n")
+
+        result_text_output.insert(tk.END, "\n")
+
+    insert_grammar_preview("Optimalizovaná gramatika G1:", payload["final1"], "more_g1")
+    insert_grammar_preview("Optimalizovaná gramatika G2:", payload["final2"], "more_g2")
+
+    if payload["equivalent"]:
+        result_text_output.insert(
+            tk.END,
+            f"Výsledok: pre dĺžky ≤ {payload['eq_length']} sú jazyky G1 a G2 ekvivalentné."
+        )
+    else:
+        result_text_output.insert(
+            tk.END,
+            f"Výsledok: pre dĺžky ≤ {payload['eq_length']} NIE sú jazyky G1 a G2 ekvivalentné."
+        )
+
+    result_text_output.config(state="disabled")
+    result_update_scrollbar()
 
 
 ### GUI SETUP ###
 
 def setup_start_frame(frame):
-    frame.grid_rowconfigure(0, weight=1)
-    frame.grid_rowconfigure(1, weight=0)
+    frame.grid_rowconfigure(0, weight=0)
+    frame.grid_rowconfigure(1, weight=1)
     frame.grid_rowconfigure(2, weight=0)
     frame.grid_rowconfigure(3, weight=1)
     frame.grid_columnconfigure(0, weight=1)
@@ -1122,10 +1337,10 @@ def setup_start_frame(frame):
         font=TITLE_FONT,
         bg=BG_COLOR,
         fg=TEXT_COLOR
-    ).grid(row=0, column=0, pady=(40, 10))
+    ).grid(row=0, column=0, pady=(35, 10), sticky="n")
 
     btns = tk.Frame(frame, bg=BG_COLOR)
-    btns.grid(row=1, column=0, pady=10)
+    btns.grid(row=2, column=0)
 
     tk.Button(
         btns,
@@ -1145,7 +1360,7 @@ def setup_start_frame(frame):
         bg=BUTTON_BG,
         fg=BUTTON_FG,
         width=18,
-        height=1,
+        height=2,
         command=lambda: show_frame(frame_info)
     ).grid(row=1, column=0, padx=10)
 
@@ -1335,13 +1550,8 @@ def setup_input_frame(frame):
                 show_error_popup("Chyby vo vstupe", eq_error)
                 return
 
-            text = build_result_text(eq_length)
-
-            result_text_output.config(state="normal")
-            result_text_output.delete("1.0", tk.END)
-            result_text_output.insert("1.0", text)
-            result_text_output.config(state="disabled")
-            result_update_scrollbar()
+            payload = build_result_payload(eq_length)
+            render_result(payload)
 
             show_frame(frame_result)
             return
@@ -1360,13 +1570,8 @@ def setup_input_frame(frame):
             show_error_popup("Chyby vo vstupe", "\n".join(all_errors))
             return
 
-        text = build_result_text(eq_length)
-
-        result_text_output.config(state="normal")
-        result_text_output.delete("1.0", tk.END)
-        result_text_output.insert("1.0", text)
-        result_text_output.config(state="disabled")
-        result_update_scrollbar()
+        payload = build_result_payload(eq_length)
+        render_result(payload)
 
         show_frame(frame_result)
 
@@ -1429,9 +1634,9 @@ def setup_result_frame(frame):
         borderwidth=0,
         highlightthickness=0,
         state="disabled",
+        cursor="arrow",
     )
     text_output.grid(row=0, column=0, sticky="nsew")
-    text_output.tag_configure("emptyset", font=("Segoe UI Symbol", 22, "bold"))
 
     scrollbar = tk.Scrollbar(output_frame, orient="vertical", command=text_output.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")
@@ -1492,8 +1697,8 @@ def setup_result_frame(frame):
 
 root = tk.Tk()
 root.title("Testovanie")
-root.geometry("1250x650")
-root.minsize(1100, 600)
+root.geometry("1000x560")
+root.minsize(900, 500)
 root.configure(bg=BG_COLOR)
 
 container = tk.Frame(root, bg=BG_COLOR)
