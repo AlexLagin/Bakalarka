@@ -16,6 +16,7 @@ expanded_rule_sections = set()
 last_result_payload = None
 
 help_popup = None
+error_popup = None
 active_rule_widget = None
 
 
@@ -105,13 +106,24 @@ LHS_NONTERMINAL_PATTERN = re.compile(r"^[A-Z0-9]+'*$|^[A-Z0-9][A-Z0-9]+'*$")
 
 
 def show_error_popup(title: str, message: str):
+    global error_popup
+
+    # Ak už existuje staré chybové okno, zavri ho
+    if error_popup is not None:
+        try:
+            if error_popup.winfo_exists():
+                error_popup.destroy()
+        except Exception:
+            pass
+        error_popup = None
+
     popup = tk.Toplevel(root)
+    error_popup = popup
+
     popup.title(title)
     popup.configure(bg=BG_COLOR)
     popup.resizable(False, False)
-
     popup.transient(root)
-    popup.grab_set()
 
     body = tk.Frame(popup, bg=BG_COLOR, padx=18, pady=14)
     body.pack(fill="both", expand=True)
@@ -134,6 +146,15 @@ def show_error_popup(title: str, message: str):
         wraplength=760
     ).pack(anchor="w", pady=(10, 15))
 
+    def close_popup():
+        global error_popup
+        try:
+            if popup.winfo_exists():
+                popup.destroy()
+        except Exception:
+            pass
+        error_popup = None
+
     btn = tk.Button(
         body,
         text="OK",
@@ -142,12 +163,13 @@ def show_error_popup(title: str, message: str):
         fg=BUTTON_FG,
         width=10,
         height=1,
-        command=popup.destroy
+        command=close_popup
     )
     btn.pack(anchor="e")
 
-    popup.bind("<Return>", lambda e: popup.destroy())
-    popup.bind("<Escape>", lambda e: popup.destroy())
+    popup.bind("<Return>", lambda e: close_popup())
+    popup.bind("<Escape>", lambda e: close_popup())
+    popup.protocol("WM_DELETE_WINDOW", close_popup)
 
     popup.update_idletasks()
     w = popup.winfo_width()
@@ -156,9 +178,10 @@ def show_error_popup(title: str, message: str):
     y = root.winfo_rooty() + (root.winfo_height() // 2) - (h // 2)
     popup.geometry(f"{w}x{h}+{x}+{y}")
 
-    popup.focus_set()
-    btn.focus_set()
-    popup.wait_window()
+    popup.lift()
+    popup.focus_force()
+
+
 
 
 def show_intro_popup():
@@ -268,7 +291,7 @@ def show_input_help_popup():
         "   • Alternatívy oddeľuj znakom |.\n"
         "   • Prázdne slovo zapisuj ako ().\n"
         "   • Tlačidlá nad L_test slúžia na rýchle vkladanie symbolov →, ->, | a ().\n"
-        "   • Po stlačení tlačidla sa vybraný znak vloží na aktuálnu pozíciu kurzora "
+        "   • Po stlačení tlačidla sa vybraný znak vloží na aktuálnu pozíciu kurzora\n\n "
         "3) L_test\n"
         "   • Určuje maximálnu dĺžku reťazcov, do ktorej sa porovnávajú jazyky.\n"
         "   • Nemôže zostať prázdne.\n"
