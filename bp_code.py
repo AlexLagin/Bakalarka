@@ -1,50 +1,102 @@
 import tkinter as tk
 import itertools
 import re
+import json
+from pathlib import Path
 from functools import lru_cache
 
-# Uloženie vstupov pre G1 a G2 medzi scénami
+
+# =========================
+# GLOBÁLNE DÁTA A NASTAVENIA
+# =========================
+
 g1_data = {}
 g2_data = {}
 
-# referencie na vstupné polia, aby sa dali resetnúť
 g1_inputs = {}
 g2_inputs = {}
-common_inputs = {}  # napr. L_test
+common_inputs = {}
 
 expanded_rule_sections = set()
 last_result_payload = None
+active_rule_widget = None
 
 help_popup = None
 error_popup = None
-active_rule_widget = None
+history_popup = None
+history_text_output = None
+
+RESULTS_JSON_FILE = Path("vysledky_ekvivalencie.json")
 
 
-### GUI NASTAVENIA ###
+# =========================
+# GUI NASTAVENIA
+# =========================
 
 BG_COLOR = '#d0e7f9'
 TEXT_COLOR = '#00274d'
 BUTTON_BG = '#00509e'
 BUTTON_FG = 'white'
+
 TITLE_FONT = ("Arial", 20, "bold")
 LABEL_FONT = ("Arial", 14)
 ENTRY_FONT = ("Arial", 14)
 BUTTON_FONT = ("Arial", 16)
 
+LHS_NONTERMINAL_PATTERN = re.compile(r"^[A-Z0-9]+'*$|^[A-Z0-9][A-Z0-9]+'*$")
 
-### VŠEOBECNÉ FUNKCIE ###
+
+# =========================
+# VŠEOBECNÉ GUI FUNKCIE
+# =========================
 
 def show_frame(frame):
     frame.tkraise()
 
 
-def _clear_widget(w):
-    if w is None:
+def center_popup(popup, parent):
+    popup.update_idletasks()
+    w = popup.winfo_width()
+    h = popup.winfo_height()
+    x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (w // 2)
+    y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (h // 2)
+    popup.geometry(f"{w}x{h}+{x}+{y}")
+
+
+def create_popup(title, modal=False, resizable=False):
+    popup = tk.Toplevel(root)
+    popup.title(title)
+    popup.configure(bg=BG_COLOR)
+    popup.resizable(resizable, resizable)
+    popup.transient(root)
+
+    if modal:
+        popup.grab_set()
+
+    return popup
+
+
+def create_button(parent, text, command, width=10, height=1, font=BUTTON_FONT):
+    return tk.Button(
+        parent,
+        text=text,
+        command=command,
+        font=font,
+        bg=BUTTON_BG,
+        fg=BUTTON_FG,
+        width=width,
+        height=height
+    )
+
+
+def _clear_widget(widget):
+    if widget is None:
         return
-    if isinstance(w, tk.Entry):
-        w.delete(0, tk.END)
-    elif isinstance(w, tk.Text):
-        w.delete("1.0", tk.END)
+
+    if isinstance(widget, tk.Entry):
+        widget.delete(0, tk.END)
+    elif isinstance(widget, tk.Text):
+        widget.delete("1.0", tk.END)
 
 
 def reset_all_user_inputs():
@@ -56,26 +108,50 @@ def reset_all_user_inputs():
     last_result_payload = None
     active_rule_widget = None
 
-    for w in g1_inputs.values():
-        _clear_widget(w)
-    for w in g2_inputs.values():
-        _clear_widget(w)
-    for w in common_inputs.values():
-        _clear_widget(w)
+    for widget in g1_inputs.values():
+        _clear_widget(widget)
+    for widget in g2_inputs.values():
+        _clear_widget(widget)
+    for widget in common_inputs.values():
+        _clear_widget(widget)
+
+    if "result_content_frame" in globals():
+        try:
+            for child in result_content_frame.winfo_children():
+                child.destroy()
+            result_update_scrollbar()
+        except Exception:
+            pass
 
     if "result_text_output" in globals():
         try:
             result_text_output.config(state="normal")
             result_text_output.delete("1.0", tk.END)
             result_text_output.config(state="disabled")
-            if "result_update_scrollbar" in globals():
-                result_update_scrollbar()
+            result_update_scrollbar()
         except Exception:
             pass
 
 
-def normalize_start_symbol(s: str) -> str:
-    return (s or "").strip().upper()
+def close_popup_reference(popup_name):
+    popup = globals().get(popup_name)
+
+    if popup is not None:
+        try:
+            if popup.winfo_exists():
+                popup.destroy()
+        except Exception:
+            pass
+
+    globals()[popup_name] = None
+
+
+# =========================
+# VALIDÁCIA A PARSOVANIE VSTUPOV
+# =========================
+
+def normalize_start_symbol(symbol: str) -> str:
+    return (symbol or "").strip().upper()
 
 
 def normalize_rule_arrow(text: str) -> str:
@@ -83,47 +159,106 @@ def normalize_rule_arrow(text: str) -> str:
 
 
 def validate_and_parse_eq_length(eq_text: str):
-    """
-    L_test:
-      - NESMIE byť prázdne
-      - musí obsahovať iba číslice (celé číslo >= 0)
-      - ak je neplatné, vráti error text
-    """
-    t = (eq_text or "").strip()
+    value = (eq_text or "").strip()
 
-    if not t:
+    if not value:
         return 0, "• L_test nemôže zostať prázdne."
 
-    if re.fullmatch(r"\d+", t):
-        return int(t), None
+    if re.fullmatch(r"\d+", value):
+        return int(value), None
 
     return 0, "• L_test musí byť celé číslo (iba číslice 0–9)."
 
 
-# LHS neterminál: veľké písmená a/alebo číslice, prípadne apostrofy na konci
-# Príklady: S, A1, 1, 12, S', A1'', 12'
-LHS_NONTERMINAL_PATTERN = re.compile(r"^[A-Z0-9]+'*$|^[A-Z0-9][A-Z0-9]+'*$")
+def collect_rule_syntax_errors(rules_lines):
+    errors = []
 
+    for idx, line in enumerate(rules_lines, start=1):
+        raw_original = line.strip()
+        if not raw_original:
+            continue
+
+        raw = normalize_rule_arrow(raw_original)
+
+        if "->" not in raw:
+            errors.append((idx, "Chýba '->' alebo '→'."))
+            continue
+
+        left, right = raw.split("->", 1)
+        left = left.strip().upper()
+        right = right.strip()
+
+        if not left:
+            errors.append((idx, "Chýba ľavá strana pred šípkou."))
+        elif not LHS_NONTERMINAL_PATTERN.match(left):
+            errors.append(
+                (
+                    idx,
+                    "Ľavá strana musí byť neterminál z VEĽKÝCH písmen a/alebo číslic "
+                    "(povolené aj S', A1', 12')."
+                )
+            )
+
+        if right == "":
+            errors.append((idx, "Chýba pravá strana za šípkou."))
+        else:
+            alternatives = [a.strip() for a in right.split("|")]
+            for alternative in alternatives:
+                if alternative == "":
+                    errors.append((idx, "Prázdna alternatíva za '|'. Pre epsilon použi '()'."))
+
+    return errors
+
+
+def validate_grammar_input(label, start_raw, rules_lines):
+    errors = []
+
+    if not start_raw and not rules_lines:
+        errors.append(f"• Gramatika {label} nie je úplne zadaná (chýba počiatočný symbol aj pravidlá).")
+    elif not start_raw:
+        errors.append(f"• Gramatika {label} nie je úplne zadaná (chýba počiatočný symbol).")
+    elif not rules_lines:
+        errors.append(f"• Gramatika {label} nie je úplne zadaná (chýbajú pravidlá).")
+
+    if rules_lines:
+        syntax_errors = collect_rule_syntax_errors(rules_lines)
+        if syntax_errors:
+            preview = "\n".join([f"    Riadok {i}: {reason}" for i, reason in syntax_errors[:8]])
+            more = "" if len(syntax_errors) <= 8 else f"\n    ... a ďalších {len(syntax_errors) - 8} chýb."
+            errors.append(f"• Pravidlá v {label} sú nesprávne zadané:\n" + preview + more)
+
+    return errors
+
+
+def validate_all_inputs_and_collect_errors(start1_raw, rules1_lines, start2_raw, rules2_lines):
+    g1_errors = validate_grammar_input("G1", start1_raw, rules1_lines)
+    g2_errors = validate_grammar_input("G2", start2_raw, rules2_lines)
+
+    errors = []
+
+    if g1_errors:
+        errors.extend(g1_errors)
+
+    if g1_errors and g2_errors:
+        errors.append("")
+
+    if g2_errors:
+        errors.extend(g2_errors)
+
+    return errors
+
+
+# =========================
+# POPUP OKNÁ
+# =========================
 
 def show_error_popup(title: str, message: str):
     global error_popup
 
-    # Ak už existuje staré chybové okno, zavri ho
-    if error_popup is not None:
-        try:
-            if error_popup.winfo_exists():
-                error_popup.destroy()
-        except Exception:
-            pass
-        error_popup = None
+    close_popup_reference("error_popup")
 
-    popup = tk.Toplevel(root)
-    error_popup = popup
-
-    popup.title(title)
-    popup.configure(bg=BG_COLOR)
-    popup.resizable(False, False)
-    popup.transient(root)
+    error_popup = create_popup(title, modal=False, resizable=False)
+    popup = error_popup
 
     body = tk.Frame(popup, bg=BG_COLOR, padx=18, pady=14)
     body.pack(fill="both", expand=True)
@@ -147,77 +282,49 @@ def show_error_popup(title: str, message: str):
     ).pack(anchor="w", pady=(10, 15))
 
     def close_popup():
-        global error_popup
-        try:
-            if popup.winfo_exists():
-                popup.destroy()
-        except Exception:
-            pass
-        error_popup = None
+        close_popup_reference("error_popup")
 
-    btn = tk.Button(
-        body,
-        text="OK",
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
-        width=10,
-        height=1,
-        command=close_popup
-    )
-    btn.pack(anchor="e")
+    create_button(body, "OK", close_popup, width=10).pack(anchor="e")
 
     popup.bind("<Return>", lambda e: close_popup())
     popup.bind("<Escape>", lambda e: close_popup())
     popup.protocol("WM_DELETE_WINDOW", close_popup)
 
-    popup.update_idletasks()
-    w = popup.winfo_width()
-    h = popup.winfo_height()
-    x = root.winfo_rootx() + (root.winfo_width() // 2) - (w // 2)
-    y = root.winfo_rooty() + (root.winfo_height() // 2) - (h // 2)
-    popup.geometry(f"{w}x{h}+{x}+{y}")
-
+    center_popup(popup, root)
     popup.lift()
     popup.focus_force()
 
 
+def show_text_popup(title, heading, text, modal=False, existing_popup_name=None):
+    if existing_popup_name:
+        existing_popup = globals().get(existing_popup_name)
+        if existing_popup is not None:
+            try:
+                if existing_popup.winfo_exists():
+                    existing_popup.lift()
+                    return existing_popup
+            except Exception:
+                pass
 
+    popup = create_popup(title, modal=modal, resizable=False)
 
-def show_intro_popup():
-    popup = tk.Toplevel(root)
-    popup.title("Info")
-    popup.configure(bg=BG_COLOR)
-    popup.resizable(False, False)
-
-    popup.transient(root)
-    popup.grab_set()
+    if existing_popup_name:
+        globals()[existing_popup_name] = popup
 
     body = tk.Frame(popup, bg=BG_COLOR, padx=18, pady=14)
     body.pack(fill="both", expand=True)
 
     tk.Label(
         body,
-        text="Info o aplikácii",
+        text=heading,
         font=("Arial", 16, "bold"),
         bg=BG_COLOR,
         fg=TEXT_COLOR
     ).pack(anchor="w")
 
-    intro_text = (
-        "Táto aplikácia slúži na testovanie ekvivalencie dvoch "
-        "bezkontextových gramatík.\n\n"
-        "Po stlačení tlačidla Start sa zobrazia dve textové polia "
-        "pre gramatiky G1 a G2, kde sa zadáva:\n"
-        "• počiatočný symbol\n"
-        "• pravidlá gramatiky\n\n"
-        "Následne sa zadáva hodnota L_test, ktorá určuje maximálnu "
-        "dĺžku reťazcov, do ktorej sa kontroluje ekvivalencia oboch jazykov."
-    )
-
     tk.Label(
         body,
-        text=intro_text,
+        text=text,
         font=ENTRY_FONT,
         bg=BG_COLOR,
         fg=TEXT_COLOR,
@@ -225,57 +332,56 @@ def show_intro_popup():
         wraplength=760
     ).pack(anchor="w", pady=(10, 15))
 
-    btn = tk.Button(
-        body,
-        text="OK",
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
-        width=10,
-        height=1,
-        command=popup.destroy
-    )
+    def close_popup():
+        if existing_popup_name:
+            close_popup_reference(existing_popup_name)
+        else:
+            popup.destroy()
+
+    btn = create_button(body, "OK", close_popup, width=10)
     btn.pack(anchor="e")
 
-    popup.bind("<Return>", lambda e: popup.destroy())
-    popup.bind("<Escape>", lambda e: popup.destroy())
+    popup.bind("<Return>", lambda e: close_popup())
+    popup.bind("<Escape>", lambda e: close_popup())
+    popup.protocol("WM_DELETE_WINDOW", close_popup)
 
-    popup.update_idletasks()
-    w = popup.winfo_width()
-    h = popup.winfo_height()
-    x = root.winfo_rootx() + (root.winfo_width() // 2) - (w // 2)
-    y = root.winfo_rooty() + (root.winfo_height() // 2) - (h // 2)
-    popup.geometry(f"{w}x{h}+{x}+{y}")
-
+    center_popup(popup, root)
     popup.focus_set()
     btn.focus_set()
-    popup.wait_window()
+
+    if modal:
+        popup.wait_window()
+
+    return popup
+
+
+def show_intro_popup():
+    intro_text = (
+        "Táto aplikácia slúži na testovanie ekvivalencie dvoch "
+        "bezkontextových gramatík.\n\n"
+        "Po stlačení tlačidla Start sa zobrazia dve textové polia "
+        "pre gramatiky G1 a G2, kde sa zadáva:\n"
+        "• počiatočný symbol\n"
+        "• pravidlá gramatiky\n"
+        "Na to aby zbehlo otestovanie ekvivalencie je potrebné aby obe gramatiky mali "
+        "zadaný užívateľom počiatočný symbol a pravidlá\n"
+        "Ak ostane počiatný symbol a pravidlá prázdne stačí zadať L_test(dĺžku) "
+        "a ekvivalencia sa otestuje.\n"
+        "Ak je zadaný počiatočný symbol a pravidlá ostanú prázdne alebo opačne, "
+        "testovanie ekvivalencie sa nevykoná\n\n"
+        "Následne sa zadáva hodnota L_test, ktorá určuje maximálnu "
+        "dĺžku reťazcov, do ktorej sa kontroluje ekvivalencia oboch jazykov.\n\n"
+    )
+
+    show_text_popup(
+        title="Info",
+        heading="Info o aplikácii",
+        text=intro_text,
+        modal=True
+    )
 
 
 def show_input_help_popup():
-    global help_popup
-
-    if help_popup is not None and help_popup.winfo_exists():
-        help_popup.lift()
-        return
-
-    help_popup = tk.Toplevel(root)
-    help_popup.title("Info")
-    help_popup.configure(bg=BG_COLOR)
-    help_popup.resizable(False, False)
-    help_popup.transient(root)
-
-    body = tk.Frame(help_popup, bg=BG_COLOR, padx=18, pady=14)
-    body.pack(fill="both", expand=True)
-
-    tk.Label(
-        body,
-        text="Info k zadávaniu gramatík",
-        font=("Arial", 16, "bold"),
-        bg=BG_COLOR,
-        fg=TEXT_COLOR
-    ).pack(anchor="w")
-
     help_text = (
         "1) Počiatočný symbol (S)\n"
         "   • Nie je case sensitive.\n"
@@ -298,45 +404,278 @@ def show_input_help_popup():
         "   • Musí byť zadané ako celé číslo, napr. 5, 10, 12.\n"
     )
 
-    tk.Label(
-        body,
+    show_text_popup(
+        title="Info",
+        heading="Info k zadávaniu gramatík",
         text=help_text,
+        modal=False,
+        existing_popup_name="help_popup"
+    )
+
+
+# =========================
+# HISTÓRIA TESTOVANIA
+# =========================
+
+def load_history_from_json():
+    if not RESULTS_JSON_FILE.exists():
+        return []
+
+    try:
+        with open(RESULTS_JSON_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def write_history_to_json(history):
+    with open(RESULTS_JSON_FILE, "w", encoding="utf-8") as file:
+        json.dump(history, file, ensure_ascii=False, indent=4)
+
+
+def save_result_to_json(payload):
+    counterexample_data = None
+
+    if not payload.get("equivalent", False):
+        counterexample = payload.get("counterexample")
+
+        if counterexample is not None:
+            word, belongs_to, not_belongs_to = counterexample
+            counterexample_data = {
+                "word": word,
+                "display_word": "ε" if word == "" else word,
+                "belongs_to": f"G{belongs_to}",
+                "not_belongs_to": f"G{not_belongs_to}"
+            }
+
+    record = {
+        "g1": {
+            "start_symbol": g1_data.get("start", ""),
+            "rules": g1_data.get("rules_lines", [])
+        },
+        "g2": {
+            "start_symbol": g2_data.get("start", ""),
+            "rules": g2_data.get("rules_lines", [])
+        },
+        "l_test": payload.get("eq_length"),
+        "equivalent": payload.get("equivalent", False),
+        "counterexample": counterexample_data
+    }
+
+    history = load_history_from_json()
+    history.append(record)
+    write_history_to_json(history)
+
+    render_history_text()
+
+
+def configure_history_tags(text_widget):
+    text_widget.tag_configure("card_title", font=("Arial", 15, "bold"), foreground=TEXT_COLOR)
+    text_widget.tag_configure("section_title", font=("Arial", 14, "bold"), foreground=TEXT_COLOR)
+    text_widget.tag_configure("success", font=("Arial", 14), foreground=TEXT_COLOR)
+    text_widget.tag_configure("error", font=("Arial", 14), foreground=TEXT_COLOR)
+    text_widget.tag_configure("meta", font=("Arial", 12), foreground="#4a4a4a")
+    text_widget.tag_configure("rule", font=("Consolas", 12), foreground=TEXT_COLOR)
+    text_widget.tag_configure("separator", foreground="#6f8fa8")
+
+
+def insert_history_grammar(text_widget, title, grammar):
+    start_symbol = grammar.get("start_symbol", "")
+    rules = grammar.get("rules", [])
+
+    text_widget.insert(tk.END, title + "\n", ("section_title",))
+    text_widget.insert(
+        tk.END,
+        f"Počiatočný symbol: {start_symbol if start_symbol else '(nezadaný)'}\n",
+        ("meta",)
+    )
+    text_widget.insert(tk.END, "Pravidlá:\n", ("meta",))
+
+    if rules:
+        for rule in rules:
+            text_widget.insert(tk.END, f"  {rule}\n", ("rule",))
+    else:
+        text_widget.insert(tk.END, "  Žiadne pravidlá\n", ("rule",))
+
+    text_widget.insert(tk.END, "\n")
+
+
+def insert_history_result(text_widget, record):
+    equivalent = record.get("equivalent", False)
+    counterexample = record.get("counterexample")
+
+    if equivalent:
+        text_widget.insert(
+            tk.END,
+            "Výsledok: Gramatiky G1 a G2 sú ekvivalentné.\n",
+            ("success",)
+        )
+        return
+
+    text_widget.insert(
+        tk.END,
+        "Výsledok: Gramatiky G1 a G2 NIE sú ekvivalentné.\n",
+        ("error",)
+    )
+
+    if counterexample:
+        word = counterexample.get("display_word", counterexample.get("word", ""))
+        belongs_to = counterexample.get("belongs_to", "")
+        not_belongs_to = counterexample.get("not_belongs_to", "")
+        text_widget.insert(
+            tk.END,
+            f"Protipríklad: slovo {word} patrí do {belongs_to}, ale nepatrí do {not_belongs_to}.\n",
+            ("error",)
+        )
+    else:
+        text_widget.insert(tk.END, "Protipríklad: nezistený.\n", ("error",))
+
+
+def render_history_text():
+    global history_text_output
+
+    if history_text_output is None:
+        return
+
+    try:
+        if not history_text_output.winfo_exists():
+            return
+
+        history = load_history_from_json()
+
+        history_text_output.config(state="normal")
+        history_text_output.delete("1.0", tk.END)
+        configure_history_tags(history_text_output)
+
+        if not history:
+            history_text_output.insert(
+                tk.END,
+                "Zatiaľ neexistuje žiadna história testovania.\n\n"
+                "Po otestovaní ekvivalencie sa sem automaticky načítajú záznamy "
+                "zo súboru vysledky_ekvivalencie.json."
+            )
+            history_text_output.config(state="disabled")
+            return
+
+        history_text_output.insert(
+            tk.END,
+            f"Počet uložených testovaní: {len(history)}\n",
+            ("meta",)
+        )
+        history_text_output.insert(
+            tk.END,
+            "Najnovšie testovanie je zobrazené hore.\n\n",
+            ("meta",)
+        )
+
+        reversed_history = list(reversed(history))
+
+        for display_index, record in enumerate(reversed_history, start=1):
+            original_index = len(history) - display_index + 1
+
+            history_text_output.insert(tk.END, "═" * 90 + "\n", ("separator",))
+            history_text_output.insert(tk.END, f"Testovanie č. {original_index}\n", ("card_title",))
+
+            insert_history_result(history_text_output, record)
+
+            history_text_output.insert(
+                tk.END,
+                f"Testované do dĺžky: {record.get('l_test', '')}\n\n",
+                ("meta",)
+            )
+
+            insert_history_grammar(history_text_output, "Gramatika G1", record.get("g1", {}))
+            insert_history_grammar(history_text_output, "Gramatika G2", record.get("g2", {}))
+            history_text_output.insert(tk.END, "\n")
+
+        history_text_output.config(state="disabled")
+    except Exception:
+        pass
+
+
+def show_history_popup():
+    global history_popup, history_text_output
+
+    if history_popup is not None:
+        try:
+            if history_popup.winfo_exists():
+                render_history_text()
+                history_popup.lift()
+                return
+        except Exception:
+            pass
+
+    history_popup = create_popup("História testovania", modal=False, resizable=True)
+    history_popup.geometry("950x600")
+    history_popup.minsize(760, 450)
+
+    history_popup.grid_rowconfigure(1, weight=1)
+    history_popup.grid_columnconfigure(0, weight=1)
+
+    title_row = tk.Frame(history_popup, bg=BG_COLOR)
+    title_row.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 8))
+    title_row.grid_columnconfigure(0, weight=1)
+
+    tk.Label(
+        title_row,
+        text="História testovaných gramatík",
+        font=("Arial", 16, "bold"),
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).grid(row=0, column=0, sticky="w")
+
+    body = tk.Frame(history_popup, bg=BG_COLOR)
+    body.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 10))
+    body.grid_rowconfigure(0, weight=1)
+    body.grid_columnconfigure(0, weight=1)
+
+    history_text_output = tk.Text(
+        body,
         font=ENTRY_FONT,
         bg=BG_COLOR,
         fg=TEXT_COLOR,
-        justify="left",
-        wraplength=760
-    ).pack(anchor="w", pady=(10, 15))
-
-    def close_popup():
-        global help_popup
-        if help_popup is not None and help_popup.winfo_exists():
-            help_popup.destroy()
-        help_popup = None
-
-    btn = tk.Button(
-        body,
-        text="OK",
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
-        width=10,
-        height=1,
-        command=close_popup
+        wrap="word",
+        borderwidth=0,
+        highlightthickness=0,
+        state="disabled"
     )
-    btn.pack(anchor="e")
+    history_text_output.grid(row=0, column=0, sticky="nsew")
 
-    help_popup.bind("<Return>", lambda e: close_popup())
-    help_popup.bind("<Escape>", lambda e: close_popup())
-    help_popup.protocol("WM_DELETE_WINDOW", close_popup)
+    scrollbar = tk.Scrollbar(body, orient="vertical", command=history_text_output.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    history_text_output.configure(yscrollcommand=scrollbar.set)
 
-    help_popup.update_idletasks()
-    w = help_popup.winfo_width()
-    h = help_popup.winfo_height()
-    x = root.winfo_rootx() + (root.winfo_width() // 2) - (w // 2)
-    y = root.winfo_rooty() + (root.winfo_height() // 2) - (h // 2)
-    help_popup.geometry(f"{w}x{h}+{x}+{y}")
+    btn_row = tk.Frame(history_popup, bg=BG_COLOR)
+    btn_row.grid(row=2, column=0, sticky="e", padx=18, pady=(0, 14))
 
+    create_button(btn_row, "Obnoviť", render_history_text, width=10).grid(row=0, column=0, padx=(0, 10))
+
+    def close_history_popup():
+        global history_popup, history_text_output
+
+        try:
+            if history_popup is not None and history_popup.winfo_exists():
+                history_popup.destroy()
+        except Exception:
+            pass
+
+        history_popup = None
+        history_text_output = None
+
+    create_button(btn_row, "Zavrieť", close_history_popup, width=10).grid(row=0, column=1)
+
+    history_popup.protocol("WM_DELETE_WINDOW", close_history_popup)
+    history_popup.bind("<Escape>", lambda e: close_history_popup())
+
+    render_history_text()
+    history_popup.lift()
+
+
+# =========================
+# POMOCNÉ FUNKCIE PRE PRAVIDLÁ
+# =========================
 
 def set_active_rule_widget(widget):
     global active_rule_widget
@@ -377,17 +716,13 @@ def sorted_nonterminals(nonterminals):
 
 
 def tokenize_by_nonterminals(prod, nonterminals):
-    """
-    Rozbije produkciu na tokeny podľa známych neterminálov.
-    Najdlhší neterminál má prioritu.
-    Všetko ostatné sa berie po jednom znaku ako terminál.
-    """
     nts = sorted_nonterminals(nonterminals)
     tokens = []
     i = 0
 
     while i < len(prod):
         matched = None
+
         for nt in nts:
             if prod.startswith(nt, i):
                 matched = nt
@@ -424,97 +759,13 @@ def unique_preserve_order(items):
     return result
 
 
-def collect_rule_syntax_errors(rules_lines):
-    errors = []
-
-    for idx, line in enumerate(rules_lines, start=1):
-        raw_original = line.strip()
-        if not raw_original:
-            continue
-
-        raw = normalize_rule_arrow(raw_original)
-
-        if "->" not in raw:
-            errors.append((idx, "Chýba '->' alebo '→'."))
-            continue
-
-        left, right = raw.split("->", 1)
-        left = left.strip().upper()
-        right = right.strip()
-
-        if not left:
-            errors.append((idx, "Chýba ľavá strana pred šípkou."))
-        elif not LHS_NONTERMINAL_PATTERN.match(left):
-            errors.append((idx, "Ľavá strana musí byť neterminál z VEĽKÝCH písmen a/alebo číslic (povolené aj S', A1', 12')."))
-
-        if right == "":
-            errors.append((idx, "Chýba pravá strana za šípkou."))
-        else:
-            alts = [a.strip() for a in right.split("|")]
-            for a in alts:
-                if a == "":
-                    errors.append((idx, "Prázdna alternatíva za '|'. Pre epsilon použi '()'."))
-
-    return errors
-
-
-def validate_all_inputs_and_collect_errors(
-    start1_raw, rules1_lines,
-    start2_raw, rules2_lines
-):
-    g1_errors = []
-    g2_errors = []
-
-    if not start1_raw and not rules1_lines:
-        g1_errors.append("• Gramatika G1 nie je úplne zadaná (chýba počiatočný symbol aj pravidlá).")
-    elif not start1_raw:
-        g1_errors.append("• Gramatika G1 nie je úplne zadaná (chýba počiatočný symbol).")
-    elif not rules1_lines:
-        g1_errors.append("• Gramatika G1 nie je úplne zadaná (chýbajú pravidlá).")
-
-    if not start2_raw and not rules2_lines:
-        g2_errors.append("• Gramatika G2 nie je úplne zadaná (chýba počiatočný symbol aj pravidlá).")
-    elif not start2_raw:
-        g2_errors.append("• Gramatika G2 nie je úplne zadaná (chýba počiatočný symbol).")
-    elif not rules2_lines:
-        g2_errors.append("• Gramatika G2 nie je úplne zadaná (chýbajú pravidlá).")
-
-    if rules1_lines:
-        errs = collect_rule_syntax_errors(rules1_lines)
-        if errs:
-            preview = "\n".join([f"    Riadok {i}: {reason}" for i, reason in errs[:8]])
-            more = "" if len(errs) <= 8 else f"\n    ... a ďalších {len(errs) - 8} chýb."
-            g1_errors.append("• Pravidlá v G1 sú nesprávne zadané:\n" + preview + more)
-
-    if rules2_lines:
-        errs = collect_rule_syntax_errors(rules2_lines)
-        if errs:
-            preview = "\n".join([f"    Riadok {i}: {reason}" for i, reason in errs[:8]])
-            more = "" if len(errs) <= 8 else f"\n    ... a ďalších {len(errs) - 8} chýb."
-            g2_errors.append("• Pravidlá v G2 sú nesprávne zadané:\n" + preview + more)
-
-    errors = []
-
-    if g1_errors:
-        errors.extend(g1_errors)
-
-    if g1_errors and g2_errors:
-        errors.append("")
-
-    if g2_errors:
-        errors.extend(g2_errors)
-
-    return errors
-
-
-### FUNKCIE PRE PRÁCU S GRAMATIKOU ###
+# =========================
+# PRÁCA S GRAMATIKOU
+# =========================
 
 def process_rules(rules_input):
-    """
-    Každý riadok: S->aAB | b alebo S→aAB | b
-    "()" sa interpretuje ako epsilon.
-    """
     rules = {}
+
     for rule in rules_input:
         normalized_rule = normalize_rule_arrow(rule)
 
@@ -537,11 +788,11 @@ def find_simple_rules(grammar):
     simple_rules = {}
     nonterminals = set(grammar.keys())
 
-    for A, productions in grammar.items():
+    for left, productions in grammar.items():
         for prod in productions:
             tokens = tokenize_by_nonterminals(prod, nonterminals)
             if len(tokens) == 1 and tokens[0] in nonterminals:
-                simple_rules.setdefault(A, []).append(tokens[0])
+                simple_rules.setdefault(left, []).append(tokens[0])
 
     return simple_rules
 
@@ -563,12 +814,15 @@ def remove_simple_rules(grammar, simple_rules):
                             changed = True
 
     nonterminals = set(new_grammar.keys())
+
     for A in list(new_grammar.keys()):
         cleaned = set()
+
         for prod in new_grammar[A]:
             tokens = tokenize_by_nonterminals(prod, nonterminals)
             if not (len(tokens) == 1 and tokens[0] in nonterminals):
                 cleaned.add(prod)
+
         new_grammar[A] = cleaned
 
     return {A: list(v) for A, v in new_grammar.items()}
@@ -584,7 +838,7 @@ def merge_equivalent_non_terminals_once(grammar, original_nonterminals):
     nonterminals = set(grammar.keys())
 
     for nt, productions in grammar.items():
-        canon_prods = sorted(canonical_form(p, nonterminals) for p in productions)
+        canon_prods = sorted(canonical_form(prod, nonterminals) for prod in productions)
         key = tuple(canon_prods)
         reverse_grammar.setdefault(key, []).append(nt)
 
@@ -592,24 +846,28 @@ def merge_equivalent_non_terminals_once(grammar, original_nonterminals):
     changed = False
 
     for nts in reverse_grammar.values():
-        if len(nts) > 1:
-            candidates = [nt for nt in nts if nt in original_nonterminals]
-            winner = candidates[0] if candidates else nts[0]
+        if len(nts) <= 1:
+            continue
 
-            for nt in nts:
-                if nt == winner:
-                    continue
+        candidates = [nt for nt in nts if nt in original_nonterminals]
+        winner = candidates[0] if candidates else nts[0]
 
-                if nt in merged_grammar:
-                    del merged_grammar[nt]
+        for nt in nts:
+            if nt == winner:
+                continue
 
-                current_nonterminals = set(grammar.keys())
-                for A in list(merged_grammar.keys()):
-                    merged_grammar[A] = [
-                        replace_nonterminal_token(p, nt, winner, current_nonterminals)
-                        for p in merged_grammar[A]
-                    ]
-                changed = True
+            if nt in merged_grammar:
+                del merged_grammar[nt]
+
+            current_nonterminals = set(grammar.keys())
+
+            for A in list(merged_grammar.keys()):
+                merged_grammar[A] = [
+                    replace_nonterminal_token(prod, nt, winner, current_nonterminals)
+                    for prod in merged_grammar[A]
+                ]
+
+            changed = True
 
     return merged_grammar, changed
 
@@ -617,21 +875,21 @@ def merge_equivalent_non_terminals_once(grammar, original_nonterminals):
 def merge_equivalent_non_terminals_fixpoint(grammar, original_nonterminals):
     changed = True
     current = grammar
+
     while changed:
-        new_grammar, changed = merge_equivalent_non_terminals_once(
-            current, original_nonterminals
-        )
-        current = new_grammar
+        current, changed = merge_equivalent_non_terminals_once(current, original_nonterminals)
+
     return current
 
 
 def find_epsilon_producing(grammar, non_terminals):
     epsilon_nt = set()
     current_nonterminals = set(grammar.keys()) | set(non_terminals)
-
     changed = True
+
     while changed:
         changed = False
+
         for nt, productions in grammar.items():
             if nt in epsilon_nt:
                 continue
@@ -643,6 +901,7 @@ def find_epsilon_producing(grammar, non_terminals):
                     break
 
                 tokens = tokenize_by_nonterminals(prod, current_nonterminals)
+
                 if tokens and all(tok in current_nonterminals and tok in epsilon_nt for tok in tokens):
                     epsilon_nt.add(nt)
                     changed = True
@@ -653,11 +912,11 @@ def find_epsilon_producing(grammar, non_terminals):
 
 def remove_epsilon_productions(grammar, start_symbol, epsilon_nt):
     nonterminals = set(grammar.keys())
-    new_grammar = {A: set() for A in grammar.keys()}
+    new_grammar = {left: set() for left in grammar.keys()}
 
-    for A, productions in grammar.items():
-        for p in productions:
-            symbols = tokenize_by_nonterminals(p, nonterminals)
+    for left, productions in grammar.items():
+        for prod in productions:
+            symbols = tokenize_by_nonterminals(prod, nonterminals)
             nullable_positions = [i for i, sym in enumerate(symbols) if sym in epsilon_nt]
 
             subsets = itertools.chain.from_iterable(
@@ -667,29 +926,67 @@ def remove_epsilon_productions(grammar, start_symbol, epsilon_nt):
 
             for subset in subsets:
                 new_symbols = list(symbols)
+
                 for idx in sorted(subset, reverse=True):
                     new_symbols.pop(idx)
-                new_p = join_tokens(new_symbols)
-                new_grammar[A].add(new_p)
 
-    for A in list(new_grammar.keys()):
-        new_grammar[A].discard("")
+                new_grammar[left].add(join_tokens(new_symbols))
+
+    for left in list(new_grammar.keys()):
+        new_grammar[left].discard("")
 
     final_grammar = {}
-    for A, prod_set in new_grammar.items():
+
+    for left, prod_set in new_grammar.items():
         if prod_set:
-            final_grammar[A] = list(prod_set)
+            final_grammar[left] = list(prod_set)
+
     return final_grammar
+
+
+def remove_productions_with_missing_nonterminals(grammar, all_nonterminals):
+    """
+    Odstráni pravidlá, ktoré po predchádzajúcich úpravách obsahujú
+    pôvodný neterminál, ktorý už nemá v gramatike žiadne produkcie.
+
+    Bez tejto kontroly by napríklad po odstránení pravidla B -> ε
+    mohla v gramatike zostať produkcia A -> aBc. Keďže B by už nebolo
+    kľúčom slovníka gramatiky, generátor by ho neskôr považoval za terminál.
+    """
+    current_nonterminals = set(grammar.keys())
+    all_nonterminals = set(all_nonterminals)
+    clean = {}
+
+    for left, productions in grammar.items():
+        valid = []
+
+        for prod in productions:
+            tokens = tokenize_by_nonterminals(prod, all_nonterminals)
+
+            has_missing_nonterminal = any(
+                tok in all_nonterminals and tok not in current_nonterminals
+                for tok in tokens
+            )
+
+            if not has_missing_nonterminal:
+                valid.append(prod)
+
+        if valid:
+            clean[left] = unique_preserve_order(valid)
+
+    return clean
 
 
 def create_new_start_symbol_if_epsilon(final_grammar, original_start, epsilon_nt):
     if original_start in epsilon_nt and original_start in final_grammar:
         new_start = original_start + "'"
+
         while new_start in final_grammar:
             new_start += "'"
 
         final_grammar[original_start] = [p for p in final_grammar[original_start] if p != ""]
         final_grammar[new_start] = [original_start]
+
         return final_grammar, new_start
 
     return final_grammar, original_start
@@ -698,24 +995,25 @@ def create_new_start_symbol_if_epsilon(final_grammar, original_start, epsilon_nt
 def find_neperspektivne(grammar, non_terminals):
     productive = set()
     current_nonterminals = set(grammar.keys()) | set(non_terminals)
-
     changed = True
+
     while changed:
         changed = False
+
         for nt, productions in grammar.items():
             if nt in productive:
                 continue
 
             for prod in productions:
                 tokens = tokenize_by_nonterminals(prod, current_nonterminals)
-                is_prod = True
+                is_productive = True
 
                 for sym in tokens:
                     if sym in current_nonterminals and sym not in productive:
-                        is_prod = False
+                        is_productive = False
                         break
 
-                if is_prod:
+                if is_productive:
                     productive.add(nt)
                     changed = True
                     break
@@ -732,10 +1030,13 @@ def remove_unproductive(grammar, unproductive):
             continue
 
         valid = []
+
         for prod in productions:
             tokens = tokenize_by_nonterminals(prod, current_nonterminals)
+
             if any(tok in unproductive for tok in tokens):
                 continue
+
             valid.append(prod)
 
         if valid:
@@ -757,12 +1058,14 @@ def find_unreachable(grammar, start_symbol, protected=None):
     current_nonterminals = set(grammar.keys())
 
     while queue:
-        cur = queue.pop()
-        if cur not in grammar:
+        current = queue.pop()
+
+        if current not in grammar:
             continue
 
-        for prod in grammar[cur]:
+        for prod in grammar[current]:
             tokens = tokenize_by_nonterminals(prod, current_nonterminals)
+
             for tok in tokens:
                 if tok in current_nonterminals and tok not in reachable:
                     reachable.add(tok)
@@ -783,10 +1086,13 @@ def remove_unreachable(grammar, unreachable, protected=None):
             continue
 
         valid = []
+
         for prod in productions:
             tokens = tokenize_by_nonterminals(prod, current_nonterminals)
+
             if any(tok in unreachable and tok not in protected for tok in tokens):
                 continue
+
             valid.append(prod)
 
         if valid:
@@ -795,62 +1101,9 @@ def remove_unreachable(grammar, unreachable, protected=None):
     return clean
 
 
-### ĽAVÁ REKURZIA ###
-
-def check_left_recursion(grammar):
-    direct = set()
-    indirect = set()
-    nonterminals = set(grammar.keys())
-
-    for A, productions in grammar.items():
-        for prod in productions:
-            if not prod:
-                continue
-
-            tokens = tokenize_by_nonterminals(prod, nonterminals)
-            if not tokens:
-                continue
-
-            first = tokens[0]
-
-            if first == A:
-                direct.add(A)
-            elif first in nonterminals and first != A:
-                if leads_leftmost_to_A(first, A, grammar):
-                    indirect.add(A)
-
-    return direct, indirect
-
-
-def leads_leftmost_to_A(current, target, grammar, visited=None):
-    if visited is None:
-        visited = set()
-
-    if current in visited:
-        return False
-    visited.add(current)
-
-    nonterminals = set(grammar.keys())
-
-    for p in grammar.get(current, []):
-        if not p:
-            continue
-
-        tokens = tokenize_by_nonterminals(p, nonterminals)
-        if not tokens:
-            continue
-
-        first_sym = tokens[0]
-
-        if first_sym == target:
-            return True
-
-        if first_sym in nonterminals and first_sym != target:
-            if leads_leftmost_to_A(first_sym, target, grammar, visited.copy()):
-                return True
-
-    return False
-
+# =========================
+# ODSTRÁNENIE ĽAVEJ REKURZIE
+# =========================
 
 def create_fresh_left_recursion_nonterminal(nt, grammar, ordered_nonterminals, orig_start):
     if nt == orig_start and "Z" not in grammar and "Z" not in ordered_nonterminals:
@@ -865,12 +1118,6 @@ def create_fresh_left_recursion_nonterminal(nt, grammar, ordered_nonterminals, o
 
 
 def remove_direct_left_recursion_single(nt, grammar, ordered_nonterminals, orig_start):
-    """
-    Opravná verzia:
-    - rieši priamu ľavú rekurziu vždy nad aktuálnym neterminálom
-    - pracuje aj s novovytvorenými neterminálmi
-    - nový neterminál vracia naspäť, aby sa dal zaradiť do poradia spracovania
-    """
     if nt not in grammar:
         return None
 
@@ -882,6 +1129,7 @@ def remove_direct_left_recursion_single(nt, grammar, ordered_nonterminals, orig_
 
     for prod in productions:
         tokens = tokenize_by_nonterminals(prod, current_nonterminals)
+
         if tokens and tokens[0] == nt:
             alpha.append(join_tokens(tokens[1:]))
         else:
@@ -891,21 +1139,22 @@ def remove_direct_left_recursion_single(nt, grammar, ordered_nonterminals, orig_
         grammar[nt] = productions
         return None
 
-    new_nt = create_fresh_left_recursion_nonterminal(
-        nt, grammar, ordered_nonterminals, orig_start
-    )
+    new_nt = create_fresh_left_recursion_nonterminal(nt, grammar, ordered_nonterminals, orig_start)
 
     new_beta = []
-    for b in beta:
-        new_beta.append(b)
-        new_beta.append(b + new_nt)
+
+    for item in beta:
+        new_beta.append(item)
+        new_beta.append(item + new_nt)
 
     new_alpha = []
-    for a in alpha:
-        if a == "":
+
+    for item in alpha:
+        if item == "":
             continue
-        new_alpha.append(a)
-        new_alpha.append(a + new_nt)
+
+        new_alpha.append(item)
+        new_alpha.append(item + new_nt)
 
     grammar[nt] = unique_preserve_order(new_beta)
     grammar[new_nt] = unique_preserve_order(new_alpha)
@@ -914,48 +1163,45 @@ def remove_direct_left_recursion_single(nt, grammar, ordered_nonterminals, orig_
 
 
 def remove_left_recursion(grammar, orig_start):
-    """
-    Štandardný postup:
-      1. pre Ai nahradí produkcie začínajúce na skorší Aj
-      2. hneď potom odstráni priamu ľavú rekurziu na Ai
-      3. ak vznikne nový neterminál (napr. A' alebo Z), zaradí ho do poradia
-    """
-    G = {A: unique_preserve_order(list(prods)) for A, prods in grammar.items()}
-    ordered_nonterminals = list(G.keys())
+    grammar_copy = {left: unique_preserve_order(list(prods)) for left, prods in grammar.items()}
+    ordered_nonterminals = list(grammar_copy.keys())
 
     i = 0
+
     while i < len(ordered_nonterminals):
         Ai = ordered_nonterminals[i]
 
-        if Ai not in G:
+        if Ai not in grammar_copy:
             i += 1
             continue
 
-        # najprv odstránenie nepriamej ľavej rekurzie cez skoršie neterminály
         for j in range(i):
             Aj = ordered_nonterminals[j]
 
-            if Aj not in G:
+            if Aj not in grammar_copy:
                 continue
 
-            current_nonterminals = set(G.keys()) | set(ordered_nonterminals)
+            current_nonterminals = set(grammar_copy.keys()) | set(ordered_nonterminals)
             new_prods = []
 
-            for prod in G[Ai]:
+            for prod in grammar_copy[Ai]:
                 tokens = tokenize_by_nonterminals(prod, current_nonterminals)
 
                 if tokens and tokens[0] == Aj:
                     suffix = join_tokens(tokens[1:])
-                    for gamma in G[Aj]:
+
+                    for gamma in grammar_copy[Aj]:
                         new_prods.append(gamma + suffix)
                 else:
                     new_prods.append(prod)
 
-            G[Ai] = unique_preserve_order(new_prods)
+            grammar_copy[Ai] = unique_preserve_order(new_prods)
 
-        # a hneď potom odstránenie priamej ľavej rekurzie nad Ai
         new_nt = remove_direct_left_recursion_single(
-            Ai, G, ordered_nonterminals, orig_start
+            Ai,
+            grammar_copy,
+            ordered_nonterminals,
+            orig_start
         )
 
         if new_nt is not None and new_nt not in ordered_nonterminals:
@@ -963,10 +1209,12 @@ def remove_left_recursion(grammar, orig_start):
 
         i += 1
 
-    return {A: prods for A, prods in G.items() if prods}
+    return {left: prods for left, prods in grammar_copy.items() if prods}
 
 
-### GENEROVANIE REŤAZCOV - OPTIMALIZOVANÉ ###
+# =========================
+# GENEROVANIE REŤAZCOV
+# =========================
 
 def grammar_signature(grammar):
     return tuple(
@@ -978,14 +1226,10 @@ def grammar_signature(grammar):
 
 
 def make_exact_length_engine(grammar):
-    """
-    Vráti funkciu gen_nt_exact(start_symbol, exact_length),
-    ktorá generuje iba reťazce PRESNE danej dĺžky.
-    """
-
     if not grammar:
         def empty_exact(start_symbol, target_len):
             return frozenset({""}) if target_len == 0 else frozenset()
+
         return empty_exact
 
     nonterminals = set(grammar.keys())
@@ -994,18 +1238,22 @@ def make_exact_length_engine(grammar):
     def tokenize(prod):
         tokens = []
         i = 0
+
         while i < len(prod):
             matched = None
+
             for nt in sorted_nts:
                 if prod.startswith(nt, i):
                     matched = nt
                     break
+
             if matched is not None:
                 tokens.append(matched)
                 i += len(matched)
             else:
                 tokens.append(prod[i])
                 i += 1
+
         return tuple(tokens)
 
     tokenized = {
@@ -1017,8 +1265,10 @@ def make_exact_length_engine(grammar):
     min_len_nt = {nt: INF for nt in nonterminals}
 
     changed = True
+
     while changed:
         changed = False
+
         for nt, prods in tokenized.items():
             best = min_len_nt[nt]
 
@@ -1028,11 +1278,13 @@ def make_exact_length_engine(grammar):
 
                 for tok in tokens:
                     if tok in nonterminals:
-                        v = min_len_nt[tok]
-                        if v == INF:
+                        value = min_len_nt[tok]
+
+                        if value == INF:
                             possible = False
                             break
-                        total += v
+
+                        total += value
                     else:
                         total += len(tok)
 
@@ -1046,14 +1298,18 @@ def make_exact_length_engine(grammar):
     @lru_cache(maxsize=None)
     def min_seq_len(tokens):
         total = 0
+
         for tok in tokens:
             if tok in nonterminals:
-                v = min_len_nt[tok]
-                if v == INF:
+                value = min_len_nt[tok]
+
+                if value == INF:
                     return INF
-                total += v
+
+                total += value
             else:
                 total += len(tok)
+
         return total
 
     in_progress_nt = set()
@@ -1067,6 +1323,7 @@ def make_exact_length_engine(grammar):
             return frozenset()
 
         key = (nt, target_len)
+
         if key in in_progress_nt:
             return frozenset()
 
@@ -1077,6 +1334,7 @@ def make_exact_length_engine(grammar):
             results.update(gen_seq_exact(tokens, target_len))
 
         in_progress_nt.remove(key)
+
         return frozenset(results)
 
     @lru_cache(maxsize=None)
@@ -1093,7 +1351,6 @@ def make_exact_length_engine(grammar):
         first = tokens[0]
         rest = tokens[1:]
         rest_min = min_seq_len(rest)
-
         results = set()
 
         if first in nonterminals:
@@ -1102,14 +1359,14 @@ def make_exact_length_engine(grammar):
 
             for left_len in range(first_min, max_first + 1):
                 left_set = gen_nt_exact(first, left_len)
+
                 if not left_set:
                     continue
 
                 right_set = gen_seq_exact(rest, target_len - left_len)
+
                 if not right_set:
                     continue
-
-                    # sem by sa normálne nevykonalo nič, keď right_set je prázdne
 
                 for left in left_set:
                     for right in right_set:
@@ -1121,6 +1378,7 @@ def make_exact_length_engine(grammar):
                 return frozenset()
 
             suffixes = gen_seq_exact(rest, target_len - token_len)
+
             for suffix in suffixes:
                 results.add(first + suffix)
 
@@ -1147,12 +1405,12 @@ def languages_equivalent_up_to_length(grammar1, start1, grammar2, start2, max_le
         return True
 
     if not grammar1:
-        gen1 = lambda s, l: frozenset({""}) if l == 0 else frozenset()
+        gen1 = lambda s, length: frozenset({""}) if length == 0 else frozenset()
     else:
         gen1 = make_exact_length_engine(grammar1)
 
     if not grammar2:
-        gen2 = lambda s, l: frozenset({""}) if l == 0 else frozenset()
+        gen2 = lambda s, length: frozenset({""}) if length == 0 else frozenset()
     else:
         gen2 = make_exact_length_engine(grammar2)
 
@@ -1164,20 +1422,13 @@ def languages_equivalent_up_to_length(grammar1, start1, grammar2, start2, max_le
 
 
 def find_counterexample_up_to_length(grammar1, start1, grammar2, start2, max_length):
-    """
-    Nájde najkratšie slovo do dĺžky max_length, ktoré patrí presne do jedného jazyka.
-    Vráti:
-        (word, 1, 2)  ak word patrí do G1 a nepatrí do G2
-        (word, 2, 1)  ak word patrí do G2 a nepatrí do G1
-        None          ak sú jazyky do danej dĺžky ekvivalentné
-    """
     if not grammar1:
-        gen1 = lambda s, l: frozenset({""}) if l == 0 else frozenset()
+        gen1 = lambda s, length: frozenset({""}) if length == 0 else frozenset()
     else:
         gen1 = make_exact_length_engine(grammar1)
 
     if not grammar2:
-        gen2 = lambda s, l: frozenset({""}) if l == 0 else frozenset()
+        gen2 = lambda s, length: frozenset({""}) if length == 0 else frozenset()
     else:
         gen2 = make_exact_length_engine(grammar2)
 
@@ -1186,17 +1437,21 @@ def find_counterexample_up_to_length(grammar1, start1, grammar2, start2, max_len
         set2 = gen2(start2, length)
 
         only_in_g1 = sorted(set1 - set2)
+
         if only_in_g1:
             return only_in_g1[0], 1, 2
 
         only_in_g2 = sorted(set2 - set1)
+
         if only_in_g2:
             return only_in_g2[0], 2, 1
 
     return None
 
 
-### OPTIMALIZÁCIA ###
+# =========================
+# OPTIMALIZÁCIA GRAMATIKY
+# =========================
 
 def optimize_grammar(start_symbol, rules_input):
     original_grammar = process_rules(rules_input)
@@ -1204,41 +1459,133 @@ def optimize_grammar(start_symbol, rules_input):
 
     epsilon_nt = find_epsilon_producing(original_grammar, original_non_terminals)
     grammar_eps = remove_epsilon_productions(original_grammar, start_symbol, epsilon_nt)
+    grammar_eps = remove_productions_with_missing_nonterminals(
+        grammar_eps,
+        original_non_terminals
+    )
 
     grammar_with_start, new_start_symbol = create_new_start_symbol_if_epsilon(
-        grammar_eps, start_symbol, epsilon_nt
+        grammar_eps,
+        start_symbol,
+        epsilon_nt
     )
 
-    grammar_no_simple = remove_simple_rules(
-        grammar_with_start, find_simple_rules(grammar_with_start)
-    )
-
+    grammar_no_simple = remove_simple_rules(grammar_with_start, find_simple_rules(grammar_with_start))
     grammar_left = remove_left_recursion(grammar_no_simple, start_symbol)
 
-    grammar_no_simple = remove_simple_rules(
-        grammar_left, find_simple_rules(grammar_left)
-    )
-
+    grammar_no_simple = remove_simple_rules(grammar_left, find_simple_rules(grammar_left))
     grammar_left = remove_left_recursion(grammar_no_simple, start_symbol)
 
     protected = {new_start_symbol}
+
     unproductive = find_neperspektivne(grammar_left, list(grammar_left.keys()))
     grammar_prod = remove_unproductive(grammar_left, unproductive)
+
     unreachable = find_unreachable(grammar_prod, new_start_symbol, protected)
     grammar_reach = remove_unreachable(grammar_prod, unreachable, protected)
 
     final_grammar = merge_equivalent_non_terminals_fixpoint(
-        grammar_reach, list(grammar_reach.keys())
+        grammar_reach,
+        list(grammar_reach.keys())
     )
+
     return final_grammar, new_start_symbol
 
 
-### VÝPIS VÝSLEDKU ###
+# =========================
+# LINEARIZÁCIA GRAMATIKY
+# =========================
 
-def format_grouped_rule_line(lhs, prods):
-    display = ["ε" if p == "" else p for p in prods]
-    return f"  {lhs} -> " + " | ".join(display)
+def production_starts_with_nonterminal(prod, nonterminals):
+    if prod == "":
+        return False, None, prod
 
+    tokens = tokenize_by_nonterminals(prod, nonterminals)
+
+    if tokens and tokens[0] in nonterminals:
+        first_nt = tokens[0]
+        rest = join_tokens(tokens[1:])
+        return True, first_nt, rest
+
+    return False, None, prod
+
+
+def is_terminal_prefixed_production(prod, nonterminals):
+    if prod == "":
+        return True
+
+    starts_with_nt, _, _ = production_starts_with_nonterminal(prod, nonterminals)
+    return not starts_with_nt
+
+
+def is_linear_grammar(grammar):
+    nonterminals = set(grammar.keys())
+
+    for productions in grammar.values():
+        for prod in productions:
+            if not is_terminal_prefixed_production(prod, nonterminals):
+                return False
+
+    return True
+
+
+def linearize_grammar(grammar, start_symbol, max_iterations=300):
+    if not grammar:
+        return {}, True
+
+    current = {
+        left: unique_preserve_order(list(productions))
+        for left, productions in grammar.items()
+    }
+
+    success = False
+
+    for _ in range(max_iterations):
+        nonterminals = set(current.keys())
+        changed = False
+        new_grammar = {}
+
+        for left, productions in current.items():
+            new_productions = []
+
+            for prod in productions:
+                starts_with_nt, first_nt, rest = production_starts_with_nonterminal(
+                    prod,
+                    nonterminals
+                )
+
+                if starts_with_nt and first_nt in current:
+                    for replacement in current[first_nt]:
+                        new_productions.append(replacement + rest)
+                    changed = True
+                else:
+                    new_productions.append(prod)
+
+            new_grammar[left] = unique_preserve_order(new_productions)
+
+        current = new_grammar
+
+        current = remove_simple_rules(current, find_simple_rules(current))
+
+        unproductive = find_neperspektivne(current, list(current.keys()))
+        current = remove_unproductive(current, unproductive)
+
+        unreachable = find_unreachable(current, start_symbol, protected={start_symbol})
+        current = remove_unreachable(current, unreachable, protected={start_symbol})
+
+        if is_linear_grammar(current):
+            success = True
+            break
+
+        if not changed:
+            break
+
+    return current, success
+
+
+# =========================
+# VÝSLEDOK TESTOVANIA
+# =========================
 
 def remaining_rules_text(count):
     if count == 1:
@@ -1248,87 +1595,113 @@ def remaining_rules_text(count):
     return f"+ {count} ďalších pravidiel"
 
 
+def count_total_productions(grammar):
+    return sum(len(prods) for prods in grammar.values())
+
+
+def format_rule_lines(lhs, productions, max_line_chars=58):
+    display = ["ε" if p == "" else p for p in productions]
+
+    if not display:
+        return [f"  {lhs} ->"]
+
+    lines = []
+    first_prefix = f"  {lhs} -> "
+    continuation_prefix = " " * len(first_prefix[:-1]) + "| "
+
+    current = first_prefix
+
+    for prod in display:
+        separator = "" if current in (first_prefix, continuation_prefix) else " | "
+        candidate = current + separator + prod
+
+        if len(candidate) <= max_line_chars:
+            current = candidate
+        else:
+            lines.append(current.rstrip())
+            current = continuation_prefix + prod
+
+    if current.strip():
+        lines.append(current.rstrip())
+
+    return lines
+
+
+def configure_result_tags(text_widget=None):
+    if text_widget is None:
+        text_widget = result_text_output
+
+    text_widget.tag_configure(
+        "summary_title",
+        font=("Arial", 16, "bold"),
+        foreground=TEXT_COLOR,
+        spacing1=4,
+        spacing3=10
+    )
+
+    text_widget.tag_configure(
+        "section_title",
+        font=("Arial", 15, "bold"),
+        foreground=TEXT_COLOR,
+        spacing1=10,
+        spacing3=6
+    )
+
+    text_widget.tag_configure(
+        "submeta",
+        font=("Arial", 12),
+        foreground="#4a4a4a",
+        spacing3=6
+    )
+
+    text_widget.tag_configure(
+        "rule",
+        font=("Consolas", 12),
+        foreground=TEXT_COLOR,
+        spacing1=1,
+        spacing3=1
+    )
+
+    text_widget.tag_configure(
+        "result_ok",
+        font=("Arial", 14, "bold"),
+        foreground="#0b6e2b",
+        spacing1=6,
+        spacing3=8
+    )
+
+    text_widget.tag_configure(
+        "result_bad",
+        font=("Arial", 14, "bold"),
+        foreground="#b00020",
+        spacing1=6,
+        spacing3=4
+    )
+
+    text_widget.tag_configure(
+        "counterexample",
+        font=("Arial", 13, "italic"),
+        foreground=TEXT_COLOR,
+        spacing3=10
+    )
+
+    text_widget.tag_configure(
+        "separator",
+        foreground="#7a96ad"
+    )
+
+
 def prepare_preview_by_nonterminal(grammar, visible_limit=7):
-    """
-    Pre každý neterminál zobrazí prvých `visible_limit` alternatív
-    a zvyšok nechá ako hidden.
-    """
     preview = []
 
     for lhs, prods in grammar.items():
-        shown = prods[:visible_limit]
-        hidden = prods[visible_limit:]
-
         preview.append({
             "lhs": lhs,
-            "shown": shown,
-            "hidden": hidden
+            "shown": prods[:visible_limit],
+            "hidden": prods[visible_limit:]
         })
 
     return preview
-
-
-def show_remaining_rules_popup(title, rule_lines):
-    popup = tk.Toplevel(root)
-    popup.title(title)
-    popup.configure(bg=BG_COLOR)
-    popup.geometry("950x520")
-    popup.minsize(750, 420)
-
-    popup.transient(root)
-    popup.grab_set()
-
-    popup.grid_rowconfigure(1, weight=1)
-    popup.grid_columnconfigure(0, weight=1)
-
-    tk.Label(
-        popup,
-        text=title,
-        font=("Arial", 16, "bold"),
-        bg=BG_COLOR,
-        fg=TEXT_COLOR
-    ).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 8))
-
-    body = tk.Frame(popup, bg=BG_COLOR)
-    body.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 10))
-    body.grid_rowconfigure(0, weight=1)
-    body.grid_columnconfigure(0, weight=1)
-
-    text_output = tk.Text(
-        body,
-        font=ENTRY_FONT,
-        bg=BG_COLOR,
-        fg=TEXT_COLOR,
-        wrap="word",
-        borderwidth=0,
-        highlightthickness=0
-    )
-    text_output.grid(row=0, column=0, sticky="nsew")
-    text_output.insert("1.0", "\n".join(rule_lines))
-    text_output.config(state="disabled")
-
-    scrollbar = tk.Scrollbar(body, orient="vertical", command=text_output.yview)
-    scrollbar.grid(row=0, column=1, sticky="ns")
-    text_output.configure(yscrollcommand=scrollbar.set)
-
-    btn = tk.Button(
-        popup,
-        text="Zavrieť",
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
-        width=12,
-        height=1,
-        command=popup.destroy
-    )
-    btn.grid(row=2, column=0, sticky="e", padx=18, pady=(0, 14))
-
-    popup.bind("<Return>", lambda e: popup.destroy())
-    popup.bind("<Escape>", lambda e: popup.destroy())
-
-    popup.focus_set()
-    btn.focus_set()
-    popup.wait_window()
 
 
 def build_result_payload(eq_length: int):
@@ -1338,12 +1711,12 @@ def build_result_payload(eq_length: int):
     rules2 = g2_data.get("rules_lines", [])
 
     lines = []
-
     both_rules_empty = (not rules1) and (not rules2)
 
     if not both_rules_empty:
         if not start1 or not rules1:
             lines.append("Gramatika G1 nie je úplne zadaná.")
+
         if not start2 or not rules2:
             lines.append("Gramatika G2 nie je úplne zadaná.")
 
@@ -1358,16 +1731,21 @@ def build_result_payload(eq_length: int):
         final2, start2_opt = optimize_grammar(start2, rules2)
 
     equivalent = languages_equivalent_up_to_length(
-        final1, start1_opt,
-        final2, start2_opt,
+        final1,
+        start1_opt,
+        final2,
+        start2_opt,
         eq_length
     )
 
     counterexample = None
+
     if not equivalent:
         counterexample = find_counterexample_up_to_length(
-            final1, start1_opt,
-            final2, start2_opt,
+            final1,
+            start1_opt,
+            final2,
+            start2_opt,
             eq_length
         )
 
@@ -1380,168 +1758,306 @@ def build_result_payload(eq_length: int):
     }
 
 
-def split_into_chunks(items, chunk_size):
-    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
-
-
-def format_continuation_line(lhs, prods):
-    display = ["ε" if p == "" else p for p in prods]
-    indent = " " * (len(lhs) + 5)
-    return indent + "| " + " | ".join(display)
-
 
 def expand_rule_section(section_key):
     expanded_rule_sections.add(section_key)
+
     if last_result_payload is not None:
         render_result(last_result_payload)
 
 
 def collapse_rule_section(section_key):
     expanded_rule_sections.discard(section_key)
+
     if last_result_payload is not None:
         render_result(last_result_payload)
 
 
-def render_result(payload):
-    global last_result_payload
-    last_result_payload = payload
+def insert_clickable_result_text(text_widget, text, tag_name, callback):
+    text_widget.insert(tk.END, text, (tag_name,))
+    text_widget.tag_configure(
+        tag_name,
+        foreground=BUTTON_BG,
+        underline=False,
+        font=("Arial", 12, "bold")
+    )
+    text_widget.tag_bind(tag_name, "<Button-1>", lambda e, cb=callback: cb())
+    text_widget.tag_bind(tag_name, "<Enter>", lambda e: text_widget.config(cursor="hand2"))
+    text_widget.tag_bind(tag_name, "<Leave>", lambda e: text_widget.config(cursor="arrow"))
 
-    result_text_output.config(state="normal")
-    result_text_output.delete("1.0", tk.END)
-    result_text_output.config(cursor="arrow")
 
-    for tag in result_text_output.tag_names():
-        if tag.startswith("more_"):
-            try:
-                result_text_output.tag_delete(tag)
-            except Exception:
-                pass
+def insert_grammar_preview(text_widget, grammar_title, grammar, tag_prefix):
+    text_widget.insert(tk.END, grammar_title + "\n", ("section_title",))
 
-    if "plain_lines" in payload:
-        result_text_output.insert("1.0", "\n".join(payload["plain_lines"]))
-        result_text_output.config(state="disabled")
-        result_update_scrollbar()
+    if not grammar:
+        text_widget.insert(
+            tk.END,
+            "Po optimalizácii gramatika ostala prázdna.\n\n",
+            ("submeta",)
+        )
         return
 
-    def insert_clickable(text, tag_name, callback):
-        result_text_output.insert(tk.END, text, (tag_name,))
-        result_text_output.tag_configure(
-            tag_name,
-            foreground=BUTTON_BG,
-            underline=False
+    nt_count = len(grammar)
+    prod_count = count_total_productions(grammar)
+
+    preview = prepare_preview_by_nonterminal(grammar, visible_limit=7)
+
+    for i, item in enumerate(preview):
+        lhs = item["lhs"]
+        shown = item["shown"]
+        hidden = item["hidden"]
+        hidden_count = len(hidden)
+
+        section_key = f"{tag_prefix}_{i}"
+
+        if hidden_count == 0:
+            for line in format_rule_lines(lhs, shown):
+                text_widget.insert(tk.END, line + "\n", ("rule",))
+            continue
+
+        if section_key not in expanded_rule_sections:
+            for line in format_rule_lines(lhs, shown):
+                text_widget.insert(tk.END, line + "\n", ("rule",))
+
+            text_widget.insert(tk.END, "      ")
+            insert_clickable_result_text(
+                text_widget,
+                f"[Zobraziť {remaining_rules_text(hidden_count)}]",
+                section_key,
+                lambda key=section_key: expand_rule_section(key)
+            )
+            text_widget.insert(tk.END, "\n")
+        else:
+            all_rules = shown + hidden
+
+            for line in format_rule_lines(lhs, all_rules):
+                text_widget.insert(tk.END, line + "\n", ("rule",))
+
+            text_widget.insert(tk.END, "      ")
+            insert_clickable_result_text(
+                text_widget,
+                "[Zbaliť pravidlá]",
+                section_key,
+                lambda key=section_key: collapse_rule_section(key)
+            )
+            text_widget.insert(tk.END, "\n")
+
+    text_widget.insert(tk.END, "\n")
+
+
+def insert_linear_grammar_preview(text_widget, grammar_title, grammar, success, tag_prefix):
+    if success:
+        title = grammar_title
+    else:
+        title = grammar_title + " - nepodarilo sa úplne linearizovať"
+
+    text_widget.insert(tk.END, title + "\n", ("section_title",))
+
+    if not grammar:
+        text_widget.insert(
+            tk.END,
+            "Lineárna gramatika je prázdna.\n\n",
+            ("submeta",)
         )
-        result_text_output.tag_bind(
-            tag_name,
-            "<Button-1>",
-            lambda e, cb=callback: cb()
-        )
-        result_text_output.tag_bind(
-            tag_name,
-            "<Enter>",
-            lambda e: result_text_output.config(cursor="hand2")
-        )
-        result_text_output.tag_bind(
-            tag_name,
-            "<Leave>",
-            lambda e: result_text_output.config(cursor="arrow")
-        )
+        return
 
-    def insert_grammar_preview(grammar_title, grammar, tag_prefix):
-        result_text_output.insert(tk.END, grammar_title + "\n")
+    nt_count = len(grammar)
+    prod_count = count_total_productions(grammar)
 
-        if not grammar:
-            result_text_output.insert(tk.END, "Po optimalizácii gramatika ostala prázdna.\n\n")
-            return
 
-        preview = prepare_preview_by_nonterminal(grammar, visible_limit=7)
+    preview = prepare_preview_by_nonterminal(grammar, visible_limit=7)
 
-        for i, item in enumerate(preview):
-            lhs = item["lhs"]
-            shown = ["ε" if p == "" else p for p in item["shown"]]
-            hidden = ["ε" if p == "" else p for p in item["hidden"]]
-            hidden_count = len(hidden)
+    for i, item in enumerate(preview):
+        lhs = item["lhs"]
+        shown = item["shown"]
+        hidden = item["hidden"]
+        hidden_count = len(hidden)
 
-            section_key = f"{tag_prefix}_{i}"
+        section_key = f"{tag_prefix}_{i}"
 
-            if hidden_count == 0:
-                if shown:
-                    result_text_output.insert(
-                        tk.END,
-                        f"  {lhs} -> " + " | ".join(shown) + "\n"
-                    )
-                else:
-                    result_text_output.insert(tk.END, f"  {lhs} ->\n")
-                continue
+        if hidden_count == 0:
+            for line in format_rule_lines(lhs, shown):
+                text_widget.insert(tk.END, line + "\n", ("rule",))
+            continue
 
-            if section_key not in expanded_rule_sections:
-                if shown:
-                    prefix = f"  {lhs} -> " + " | ".join(shown) + " | "
-                else:
-                    prefix = f"  {lhs} -> "
+        if section_key not in expanded_rule_sections:
+            for line in format_rule_lines(lhs, shown):
+                text_widget.insert(tk.END, line + "\n", ("rule",))
 
-                result_text_output.insert(tk.END, prefix)
+            text_widget.insert(tk.END, "      ")
+            insert_clickable_result_text(
+                text_widget,
+                f"[Zobraziť {remaining_rules_text(hidden_count)}]",
+                section_key,
+                lambda key=section_key: expand_rule_section(key)
+            )
+            text_widget.insert(tk.END, "\n")
+        else:
+            all_rules = shown + hidden
 
-                insert_clickable(
-                    remaining_rules_text(hidden_count),
-                    section_key,
-                    lambda key=section_key: expand_rule_section(key)
-                )
+            for line in format_rule_lines(lhs, all_rules):
+                text_widget.insert(tk.END, line + "\n", ("rule",))
 
-                result_text_output.insert(tk.END, "\n")
+            text_widget.insert(tk.END, "      ")
+            insert_clickable_result_text(
+                text_widget,
+                "[Zbaliť pravidlá]",
+                section_key,
+                lambda key=section_key: collapse_rule_section(key)
+            )
+            text_widget.insert(tk.END, "\n")
 
-            else:
-                all_rules = shown + hidden
+    text_widget.insert(tk.END, "\n")
 
-                if all_rules:
-                    prefix = f"  {lhs} -> " + " | ".join(all_rules) + " | "
-                else:
-                    prefix = f"  {lhs} -> "
 
-                result_text_output.insert(tk.END, prefix)
+def create_result_text_widget(parent, height=1):
+    text_widget = tk.Text(
+        parent,
+        font=ENTRY_FONT,
+        bg="white",
+        fg=TEXT_COLOR,
+        wrap="word",
+        height=height,
+        borderwidth=0,
+        highlightthickness=0,
+        state="normal",
+        cursor="arrow",
+        padx=0,
+        pady=0
+    )
+    configure_result_tags(text_widget)
 
-                insert_clickable(
-                    "Späť",
-                    section_key,
-                    lambda key=section_key: collapse_rule_section(key)
-                )
+    def on_text_mousewheel(event):
+        if "result_canvas" in globals() and result_canvas.bbox("all") is not None:
+            result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
 
-                result_text_output.insert(tk.END, "\n")
+    text_widget.bind("<MouseWheel>", on_text_mousewheel)
 
-        result_text_output.insert(tk.END, "\n")
+    return text_widget
 
-    insert_grammar_preview("Optimalizovaná gramatika G1:", payload["final1"], "more_g1")
-    insert_grammar_preview("Optimalizovaná gramatika G2:", payload["final2"], "more_g2")
+
+def finish_result_text_widget(text_widget):
+    text_widget.update_idletasks()
+
+    line_count = int(text_widget.index("end-1c").split(".")[0])
+    text_widget.config(
+        height=max(1, line_count + 1),
+        state="disabled"
+    )
+
+
+def clear_result_content():
+    for child in result_content_frame.winfo_children():
+        child.destroy()
+
+
+def add_summary_block(payload):
+    summary_text = create_result_text_widget(result_content_frame, height=5)
+    summary_text.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
+
+    if "plain_lines" in payload:
+        summary_text.insert(tk.END, "Výstup\n", ("summary_title",))
+        summary_text.insert(tk.END, "\n".join(payload["plain_lines"]), ("submeta",))
+        finish_result_text_widget(summary_text)
+        return
+
+    summary_text.insert(tk.END, "Súhrn výsledku\n", ("summary_title",))
+    summary_text.insert(
+        tk.END,
+        f"Testované do dĺžky: {payload['eq_length']}\n",
+        ("submeta",)
+    )
 
     if payload["equivalent"]:
-        result_text_output.insert(
+        summary_text.insert(
             tk.END,
-            f"Výsledok: pre dĺžky ≤ {payload['eq_length']} sú jazyky G1 a G2 ekvivalentné."
+            "Výsledok: Jazyky generované gramatikami G1 a G2 sú ekvivalentné do zadanej dĺžky.\n",
+            ("result_ok",)
         )
     else:
-        result_text_output.insert(
+        summary_text.insert(
             tk.END,
-            f"Výsledok: pre dĺžky ≤ {payload['eq_length']} NIE sú jazyky G1 a G2 ekvivalentné.\n"
+            "Výsledok: Jazyky generované gramatikami G1 a G2 NIE sú ekvivalentné.\n",
+            ("result_bad",)
         )
 
         counterexample = payload.get("counterexample")
+
         if counterexample is not None:
             word, belongs_to, not_belongs_to = counterexample
+            word_text = "ε" if word == "" else f"'{word}'"
 
-            if word == "":
-                word_text = "ε"
-            else:
-                word_text = f"'{word}'"
-
-            result_text_output.insert(
+            summary_text.insert(
                 tk.END,
-                f"Protipríklad: slovo {word_text} patrí do G{belongs_to}, ale nepatrí do G{not_belongs_to}."
+                f"Protipríklad: slovo {word_text} patrí do G{belongs_to}, ale nepatrí do G{not_belongs_to}.\n",
+                ("counterexample",)
             )
 
-    result_text_output.config(state="disabled")
+    finish_result_text_widget(summary_text)
+
+
+def add_single_grammar_block(row_index, grammar_title, grammar, tag_prefix):
+    block = tk.Frame(result_content_frame, bg="white")
+    block.grid(row=row_index, column=0, sticky="nsew", padx=16, pady=(8, 10))
+    block.grid_columnconfigure(0, weight=1)
+
+    text_widget = create_result_text_widget(block)
+    text_widget.pack(fill="both", expand=True)
+    insert_grammar_preview(text_widget, grammar_title, grammar, tag_prefix)
+    finish_result_text_widget(text_widget)
+
+
+def add_result_separator(row_index):
+    separator = tk.Label(
+        result_content_frame,
+        text="─" * 90,
+        font=ENTRY_FONT,
+        bg="white",
+        fg="#7a96ad"
+    )
+    separator.grid(row=row_index, column=0, sticky="ew", padx=16, pady=(0, 4))
+
+
+def render_result(payload):
+    global last_result_payload
+
+    last_result_payload = payload
+
+    clear_result_content()
+
+    result_content_frame.grid_columnconfigure(0, weight=1)
+
+    add_summary_block(payload)
+
+    if "plain_lines" in payload:
+        result_update_scrollbar()
+        return
+
+    add_result_separator(1)
+
+    add_single_grammar_block(
+        2,
+        "Optimalizovaná gramatika G1",
+        payload["final1"],
+        "more_g1"
+    )
+
+    add_result_separator(3)
+
+    add_single_grammar_block(
+        4,
+        "Optimalizovaná gramatika G2",
+        payload["final2"],
+        "more_g2"
+    )
+
     result_update_scrollbar()
 
 
-### GUI SETUP ###
+# =========================
+# GUI SETUP
+# =========================
 
 def setup_start_frame(frame):
     frame.grid_rowconfigure(0, weight=0)
@@ -1561,27 +2077,29 @@ def setup_start_frame(frame):
     btns = tk.Frame(frame, bg=BG_COLOR)
     btns.grid(row=2, column=0)
 
-    tk.Button(
+    create_button(
         btns,
-        text="Start",
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
+        "Start",
+        lambda: (reset_all_user_inputs(), show_frame(frame_input), g1_inputs["start"].focus_set()),
         width=18,
-        height=2,
-        command=lambda: (reset_all_user_inputs(), show_frame(frame_input), g1_inputs["start"].focus_set())
+        height=2
     ).grid(row=0, column=0, padx=10, pady=(0, 10))
 
-    tk.Button(
+    create_button(
         btns,
-        text="Info",
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
+        "Info",
+        show_intro_popup,
         width=18,
-        height=2,
-        command=show_intro_popup
-    ).grid(row=1, column=0, padx=10)
+        height=2
+    ).grid(row=1, column=0, padx=10, pady=(0, 10))
+
+    create_button(
+        btns,
+        "História",
+        show_history_popup,
+        width=18,
+        height=2
+    ).grid(row=2, column=0, padx=10)
 
 
 def setup_input_frame(frame):
@@ -1594,7 +2112,6 @@ def setup_input_frame(frame):
 
     title_row = tk.Frame(frame, bg=BG_COLOR)
     title_row.grid(row=0, column=0, padx=20, pady=(15, 5), sticky="ew")
-
     title_row.grid_columnconfigure(0, weight=1)
     title_row.grid_columnconfigure(1, weight=0)
     title_row.grid_columnconfigure(2, weight=1)
@@ -1607,15 +2124,13 @@ def setup_input_frame(frame):
         fg=TEXT_COLOR
     ).grid(row=0, column=1)
 
-    tk.Button(
+    create_button(
         title_row,
-        text="Info",
-        command=show_input_help_popup,
-        font=("Arial", 12, "bold"),
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
+        "Info",
+        show_input_help_popup,
         width=8,
-        height=1
+        height=1,
+        font=("Arial", 12, "bold")
     ).grid(row=0, column=2, sticky="e")
 
     blocks = tk.Frame(frame, bg=BG_COLOR)
@@ -1624,41 +2139,19 @@ def setup_input_frame(frame):
     blocks.grid_columnconfigure(0, weight=1)
     blocks.grid_columnconfigure(1, weight=1)
 
-    # G1
-    g1_frame = tk.LabelFrame(blocks, text="Gramatika G1", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)
-    g1_frame.grid(row=0, column=0, padx=(0, 10), sticky="nsew")
-    g1_frame.grid_rowconfigure(1, weight=1)
-    g1_frame.grid_columnconfigure(1, weight=1)
-
-    tk.Label(g1_frame, text="S -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR).grid(
-        row=0, column=0, pady=5, padx=10, sticky="w"
+    g1_start, g1_rules = create_grammar_input_block(
+        parent=blocks,
+        title="Gramatika G1",
+        column=0,
+        padx=(0, 10)
     )
-    g1_start = tk.Entry(g1_frame, font=ENTRY_FONT)
-    g1_start.grid(row=0, column=1, pady=5, padx=10, sticky="ew")
 
-    tk.Label(g1_frame, text="P -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR).grid(
-        row=1, column=0, pady=5, padx=10, sticky="nw"
+    g2_start, g2_rules = create_grammar_input_block(
+        parent=blocks,
+        title="Gramatika G2",
+        column=1,
+        padx=(10, 0)
     )
-    g1_rules = tk.Text(g1_frame, font=ENTRY_FONT, height=8, wrap="word")
-    g1_rules.grid(row=1, column=1, pady=5, padx=10, sticky="nsew")
-
-    # G2
-    g2_frame = tk.LabelFrame(blocks, text="Gramatika G2", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR)
-    g2_frame.grid(row=0, column=1, padx=(10, 0), sticky="nsew")
-    g2_frame.grid_rowconfigure(1, weight=1)
-    g2_frame.grid_columnconfigure(1, weight=1)
-
-    tk.Label(g2_frame, text="S -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR).grid(
-        row=0, column=0, pady=5, padx=10, sticky="w"
-    )
-    g2_start = tk.Entry(g2_frame, font=ENTRY_FONT)
-    g2_start.grid(row=0, column=1, pady=5, padx=10, sticky="ew")
-
-    tk.Label(g2_frame, text="P -", font=LABEL_FONT, bg=BG_COLOR, fg=TEXT_COLOR).grid(
-        row=1, column=0, pady=5, padx=10, sticky="nw"
-    )
-    g2_rules = tk.Text(g2_frame, font=ENTRY_FONT, height=8, wrap="word")
-    g2_rules.grid(row=1, column=1, pady=5, padx=10, sticky="nsew")
 
     g1_rules.bind("<FocusIn>", lambda e: set_active_rule_widget(g1_rules))
     g1_rules.bind("<Button-1>", lambda e: set_active_rule_widget(g1_rules))
@@ -1670,6 +2163,48 @@ def setup_input_frame(frame):
 
     set_active_rule_widget(g1_rules)
 
+    entry_eq = create_input_controls(frame, g1_start, g1_rules, g2_start, g2_rules)
+    common_inputs = {"eq_len": entry_eq}
+
+
+def create_grammar_input_block(parent, title, column, padx):
+    grammar_frame = tk.LabelFrame(
+        parent,
+        text=title,
+        font=LABEL_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    )
+    grammar_frame.grid(row=0, column=column, padx=padx, sticky="nsew")
+    grammar_frame.grid_rowconfigure(1, weight=1)
+    grammar_frame.grid_columnconfigure(1, weight=1)
+
+    tk.Label(
+        grammar_frame,
+        text="S -",
+        font=LABEL_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).grid(row=0, column=0, pady=5, padx=10, sticky="w")
+
+    start_entry = tk.Entry(grammar_frame, font=ENTRY_FONT)
+    start_entry.grid(row=0, column=1, pady=5, padx=10, sticky="ew")
+
+    tk.Label(
+        grammar_frame,
+        text="P -",
+        font=LABEL_FONT,
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).grid(row=1, column=0, pady=5, padx=10, sticky="nw")
+
+    rules_text = tk.Text(grammar_frame, font=ENTRY_FONT, height=8, wrap="word")
+    rules_text.grid(row=1, column=1, pady=5, padx=10, sticky="nsew")
+
+    return start_entry, rules_text
+
+
+def create_input_controls(frame, g1_start, g1_rules, g2_start, g2_rules):
     controls = tk.Frame(frame, bg=BG_COLOR)
     controls.grid(row=2, column=0, pady=(0, 15), sticky="ew")
     controls.grid_columnconfigure(0, weight=1)
@@ -1682,19 +2217,15 @@ def setup_input_frame(frame):
     symbol_bar = tk.Frame(middle, bg=BG_COLOR)
     symbol_bar.grid(row=0, column=0, columnspan=2, pady=(5, 10))
 
-    symbol_buttons = ["→", "->", "|", "()"]
-
-    for i, symbol in enumerate(symbol_buttons):
-        tk.Button(
+    for index, symbol in enumerate(["→", "->", "|", "()"]):
+        create_button(
             symbol_bar,
-            text=symbol,
-            command=lambda s=symbol: insert_rule_symbol(s),
-            font=("Arial", 12, "bold"),
-            bg=BUTTON_BG,
-            fg=BUTTON_FG,
+            symbol,
+            lambda s=symbol: insert_rule_symbol(s),
             width=5,
-            height=1
-        ).grid(row=0, column=i, padx=5)
+            height=1,
+            font=("Arial", 12, "bold")
+        ).grid(row=0, column=index, padx=5)
 
     tk.Label(
         middle,
@@ -1707,83 +2238,95 @@ def setup_input_frame(frame):
     entry_eq = tk.Entry(middle, font=ENTRY_FONT, width=10)
     entry_eq.grid(row=1, column=1, padx=(0, 10), pady=(5, 2), sticky="w")
 
-    def on_test():
-        start1_raw = g1_start.get().strip()
-        rules1_text = g1_rules.get("1.0", tk.END).strip()
-        rules1_lines = rules1_text.split("\n") if rules1_text else []
-
-        start2_raw = g2_start.get().strip()
-        rules2_text = g2_rules.get("1.0", tk.END).strip()
-        rules2_lines = rules2_text.split("\n") if rules2_text else []
-
-        eq_length, eq_error = validate_and_parse_eq_length(entry_eq.get())
-
-        g1_data["start"] = normalize_start_symbol(start1_raw)
-        g1_data["rules_lines"] = rules1_lines
-
-        g2_data["start"] = normalize_start_symbol(start2_raw)
-        g2_data["rules_lines"] = rules2_lines
-
-        if not rules1_text and not rules2_text:
-            if eq_error:
-                show_error_popup("Chyby vo vstupe", eq_error)
-                return
-
-            payload = build_result_payload(eq_length)
-            render_result(payload)
-
-            show_frame(frame_result)
-            return
-
-        all_errors = validate_all_inputs_and_collect_errors(
-            start1_raw, rules1_lines,
-            start2_raw, rules2_lines
-        )
-
-        if eq_error:
-            if all_errors:
-                all_errors.append("")
-            all_errors.append(eq_error)
-
-        if all_errors:
-            show_error_popup("Chyby vo vstupe", "\n".join(all_errors))
-            return
-
-        payload = build_result_payload(eq_length)
-        render_result(payload)
-
-        show_frame(frame_result)
-
     btn_row = tk.Frame(middle, bg=BG_COLOR)
     btn_row.grid(row=2, column=0, columnspan=2, pady=(8, 5))
 
-    tk.Button(
+    create_button(
         btn_row,
-        text="Testovať ekvivalenciu",
-        command=on_test,
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
+        "Testovať ekvivalenciu",
+        lambda: on_test(g1_start, g1_rules, g2_start, g2_rules, entry_eq),
         width=20,
-        height=1,
+        height=1
     ).grid(row=0, column=0, padx=10)
 
-    tk.Button(
+    create_button(
         btn_row,
-        text="Späť",
-        command=lambda: show_frame(frame_start),
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
+        "Späť",
+        lambda: show_frame(frame_start),
         width=10,
-        height=1,
+        height=1
     ).grid(row=0, column=1, padx=10)
 
-    common_inputs = {"eq_len": entry_eq}
+    return entry_eq
+
+
+def read_input_values(g1_start, g1_rules, g2_start, g2_rules):
+    start1_raw = g1_start.get().strip()
+    rules1_text = g1_rules.get("1.0", tk.END).strip()
+    rules1_lines = rules1_text.split("\n") if rules1_text else []
+
+    start2_raw = g2_start.get().strip()
+    rules2_text = g2_rules.get("1.0", tk.END).strip()
+    rules2_lines = rules2_text.split("\n") if rules2_text else []
+
+    return start1_raw, rules1_text, rules1_lines, start2_raw, rules2_text, rules2_lines
+
+
+def store_input_values(start1_raw, rules1_lines, start2_raw, rules2_lines):
+    g1_data["start"] = normalize_start_symbol(start1_raw)
+    g1_data["rules_lines"] = rules1_lines
+
+    g2_data["start"] = normalize_start_symbol(start2_raw)
+    g2_data["rules_lines"] = rules2_lines
+
+
+def on_test(g1_start, g1_rules, g2_start, g2_rules, entry_eq):
+    start1_raw, rules1_text, rules1_lines, start2_raw, rules2_text, rules2_lines = read_input_values(
+        g1_start,
+        g1_rules,
+        g2_start,
+        g2_rules
+    )
+
+    eq_length, eq_error = validate_and_parse_eq_length(entry_eq.get())
+
+    store_input_values(start1_raw, rules1_lines, start2_raw, rules2_lines)
+
+    if not rules1_text and not rules2_text:
+        if eq_error:
+            show_error_popup("Chyby vo vstupe", eq_error)
+            return
+
+        payload = build_result_payload(eq_length)
+        save_result_to_json(payload)
+        render_result(payload)
+        show_frame(frame_result)
+        return
+
+    all_errors = validate_all_inputs_and_collect_errors(
+        start1_raw,
+        rules1_lines,
+        start2_raw,
+        rules2_lines
+    )
+
+    if eq_error:
+        if all_errors:
+            all_errors.append("")
+        all_errors.append(eq_error)
+
+    if all_errors:
+        show_error_popup("Chyby vo vstupe", "\n".join(all_errors))
+        return
+
+    payload = build_result_payload(eq_length)
+    save_result_to_json(payload)
+    render_result(payload)
+    show_frame(frame_result)
 
 
 def setup_result_frame(frame):
-    global result_text_output, result_update_scrollbar
+    global result_content_frame, result_canvas, result_update_scrollbar
 
     frame.grid_rowconfigure(0, weight=0)
     frame.grid_rowconfigure(1, weight=1)
@@ -1803,32 +2346,47 @@ def setup_result_frame(frame):
     output_frame.grid_rowconfigure(0, weight=1)
     output_frame.grid_columnconfigure(0, weight=1)
 
-    text_output = tk.Text(
+    card = tk.Frame(
         output_frame,
-        font=ENTRY_FONT,
-        bg=BG_COLOR,
-        fg=TEXT_COLOR,
-        wrap="word",
-        height=18,
-        borderwidth=0,
-        highlightthickness=0,
-        state="disabled",
-        cursor="arrow",
+        bg="white",
+        bd=1,
+        relief="solid"
     )
-    text_output.grid(row=0, column=0, sticky="nsew")
+    card.grid(row=0, column=0, sticky="nsew")
+    card.grid_rowconfigure(0, weight=1)
+    card.grid_columnconfigure(0, weight=1)
 
-    scrollbar = tk.Scrollbar(output_frame, orient="vertical", command=text_output.yview)
+    result_canvas = tk.Canvas(
+        card,
+        bg="white",
+        borderwidth=0,
+        highlightthickness=0
+    )
+    result_canvas.grid(row=0, column=0, sticky="nsew")
+
+    scrollbar = tk.Scrollbar(card, orient="vertical", command=result_canvas.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")
     scrollbar.grid_remove()
 
+    result_content_frame = tk.Frame(result_canvas, bg="white")
+    content_window = result_canvas.create_window(
+        (0, 0),
+        window=result_content_frame,
+        anchor="nw"
+    )
+
     def update_scrollbar():
-        text_output.update_idletasks()
-        info = text_output.dlineinfo("end-1c")
-        if info is None:
+        result_canvas.update_idletasks()
+        result_canvas.configure(scrollregion=result_canvas.bbox("all"))
+
+        bbox = result_canvas.bbox("all")
+        if bbox is None:
             scrollbar.grid_remove()
             return
-        y_bottom = info[1] + info[3]
-        if y_bottom > text_output.winfo_height():
+
+        content_height = bbox[3] - bbox[1]
+
+        if content_height > result_canvas.winfo_height():
             scrollbar.grid(row=0, column=1, sticky="ns")
         else:
             scrollbar.grid_remove()
@@ -1836,48 +2394,55 @@ def setup_result_frame(frame):
     def yscrollcommand(*args):
         scrollbar.set(*args)
 
-    text_output.configure(yscrollcommand=yscrollcommand)
+    result_canvas.configure(yscrollcommand=yscrollcommand)
 
-    def on_output_configure(event):
+    def on_content_configure(event):
+        result_canvas.configure(scrollregion=result_canvas.bbox("all"))
         update_scrollbar()
 
-    output_frame.bind("<Configure>", on_output_configure)
+    def on_canvas_configure(event):
+        result_canvas.itemconfigure(content_window, width=event.width)
+        update_scrollbar()
+
+    result_content_frame.bind("<Configure>", on_content_configure)
+    result_canvas.bind("<Configure>", on_canvas_configure)
+
+    def on_mousewheel(event):
+        if result_canvas.bbox("all") is not None:
+            result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    result_canvas.bind("<MouseWheel>", on_mousewheel)
 
     btns = tk.Frame(frame, bg=BG_COLOR)
     btns.grid(row=2, column=0, pady=(0, 15))
 
-    tk.Button(
+    create_button(
         btns,
-        text="Späť na zadávanie",
-        command=lambda: (reset_all_user_inputs(), show_frame(frame_input), g1_inputs["start"].focus_set()),
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
+        "Späť na zadávanie",
+        lambda: (reset_all_user_inputs(), show_frame(frame_input), g1_inputs["start"].focus_set()),
         width=18,
-        height=1,
+        height=1
     ).grid(row=0, column=0, padx=10, pady=5)
 
-    tk.Button(
+    create_button(
         btns,
-        text="Na začiatok",
-        command=lambda: (reset_all_user_inputs(), show_frame(frame_start)),
-        font=BUTTON_FONT,
-        bg=BUTTON_BG,
-        fg=BUTTON_FG,
+        "Na začiatok",
+        lambda: (reset_all_user_inputs(), show_frame(frame_start)),
         width=14,
-        height=1,
+        height=1
     ).grid(row=0, column=1, padx=10, pady=5)
 
-    result_text_output = text_output
     result_update_scrollbar = update_scrollbar
 
 
-### HLAVNÉ OKNO ###
+# =========================
+# HLAVNÉ OKNO
+# =========================
 
 root = tk.Tk()
 root.title("Testovanie")
-root.geometry("1000x560")
-root.minsize(900, 500)
+root.geometry("1250x720")
+root.minsize(1100, 650)
 root.configure(bg=BG_COLOR)
 
 container = tk.Frame(root, bg=BG_COLOR)
@@ -1889,12 +2454,13 @@ frame_start = tk.Frame(container, bg=BG_COLOR)
 frame_input = tk.Frame(container, bg=BG_COLOR)
 frame_result = tk.Frame(container, bg=BG_COLOR)
 
-for f in (frame_start, frame_input, frame_result):
-    f.grid(row=0, column=0, sticky="nsew")
+for current_frame in (frame_start, frame_input, frame_result):
+    current_frame.grid(row=0, column=0, sticky="nsew")
 
 setup_start_frame(frame_start)
 setup_input_frame(frame_input)
 setup_result_frame(frame_result)
 
 show_frame(frame_start)
+
 root.mainloop()
