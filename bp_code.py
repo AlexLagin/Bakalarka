@@ -209,6 +209,113 @@ def collect_rule_syntax_errors(rules_lines):
 
     return errors
 
+def is_nonterminal_like_token(token):
+    return re.fullmatch(r"[A-Z0-9]+'*", token or "") is not None
+
+
+def collect_defined_nonterminals(rules_lines):
+    defined = set()
+
+    for line in rules_lines:
+        raw = normalize_rule_arrow(line.strip())
+
+        if "->" not in raw:
+            continue
+
+        left, _ = raw.split("->", 1)
+        left = left.strip().upper()
+
+        if LHS_NONTERMINAL_PATTERN.match(left):
+            defined.add(left)
+
+    return defined
+
+
+def tokenize_rhs_for_validation(prod, defined_nonterminals):
+    """
+    Tokenizuje pravú stranu pravidla pre účely validácie.
+
+    Najprv sa snaží nájsť známe neterminály podľa ľavej strany pravidiel.
+    Ak narazí na veľké písmeno alebo číslicu, ktoré nepatria známemu
+    neterminálu, zoberie ich ako možný nedefinovaný neterminál.
+    """
+    tokens = []
+    nts = sorted(defined_nonterminals, key=len, reverse=True)
+    i = 0
+
+    while i < len(prod):
+        matched = None
+
+        for nt in nts:
+            if prod.startswith(nt, i):
+                matched = nt
+                break
+
+        if matched is not None:
+            tokens.append(matched)
+            i += len(matched)
+            continue
+
+        if prod[i].isupper() or prod[i].isdigit():
+            j = i + 1
+
+            while j < len(prod) and (
+                prod[j].isupper()
+                or prod[j].isdigit()
+                or prod[j] == "'"
+            ):
+                j += 1
+
+            tokens.append(prod[i:j])
+            i = j
+        else:
+            tokens.append(prod[i])
+            i += 1
+
+    return tokens
+
+
+def collect_rule_semantic_errors(label, start_raw, rules_lines):
+    errors = []
+    start_symbol = normalize_start_symbol(start_raw)
+    defined_nonterminals = collect_defined_nonterminals(rules_lines)
+
+    if start_symbol and start_symbol not in defined_nonterminals:
+        errors.append(
+            f"Počiatočný symbol {start_symbol} v gramatike {label} "
+            "sa nenachádza v pravidlách na ľavej strane."
+        )
+
+    for idx, line in enumerate(rules_lines, start=1):
+        raw = normalize_rule_arrow(line.strip())
+
+        if "->" not in raw:
+            continue
+
+        _, right = raw.split("->", 1)
+        alternatives = [alternative.strip() for alternative in right.split("|")]
+
+        for alternative in alternatives:
+            if alternative == "()" or alternative == "":
+                continue
+
+            tokens = tokenize_rhs_for_validation(alternative, defined_nonterminals)
+
+            undefined = [
+                token
+                for token in tokens
+                if is_nonterminal_like_token(token)
+                and token not in defined_nonterminals
+            ]
+
+            if undefined:
+                unique_undefined = unique_preserve_order(undefined)
+                errors.append(
+                    f"Riadok {idx}: pravá strana obsahuje nedefinovaný "
+                    f"neterminál {', '.join(unique_undefined)}."
+                )
+
+    return errors
 
 def validate_grammar_input(label, start_raw, rules_lines):
     errors = []
@@ -222,11 +329,22 @@ def validate_grammar_input(label, start_raw, rules_lines):
 
     if rules_lines:
         syntax_errors = collect_rule_syntax_errors(rules_lines)
+
         if syntax_errors:
             preview = "\n".join([f"    Riadok {i}: {reason}" for i, reason in syntax_errors[:8]])
             more = "" if len(syntax_errors) <= 8 else f"\n    ... a ďalších {len(syntax_errors) - 8} chýb."
             errors.append(f"• Pravidlá v {label} sú nesprávne zadané:\n" + preview + more)
+        else:
+            semantic_errors = collect_rule_semantic_errors(label, start_raw, rules_lines)
 
+            if semantic_errors:
+                preview = "\n".join([f"    {reason}" for reason in semantic_errors[:8]])
+                more = "" if len(semantic_errors) <= 8 else f"\n    ... a ďalších {len(semantic_errors) - 8} chýb."
+                errors.append(
+                    f"• Pravidlá v {label} obsahujú nedefinované alebo nepoužiteľné neterminály:\n"
+                    + preview
+                    + more
+                )
     return errors
 
 
@@ -509,14 +627,14 @@ def insert_history_result(text_widget, record):
     if equivalent:
         text_widget.insert(
             tk.END,
-            "Výsledok: Gramatiky G1 a G2 sú ekvivalentné.\n",
+            "Výsledok: Jazyky generované gramatikami G1 a G2 sú ekvivalentné do zadanej dĺžky.\n",
             ("success",)
         )
         return
 
     text_widget.insert(
         tk.END,
-        "Výsledok: Gramatiky G1 a G2 NIE sú ekvivalentné.\n",
+        "Výsledok: Jazyky generované gramatikami G1 a G2 NIE sú ekvivalentné.\n",
         ("error",)
     )
 
@@ -978,18 +1096,34 @@ def remove_productions_with_missing_nonterminals(grammar, all_nonterminals):
 
 
 def create_new_start_symbol_if_epsilon(final_grammar, original_start, epsilon_nt):
-    if original_start in epsilon_nt and original_start in final_grammar:
-        new_start = original_start + "'"
+    """
+    Ak pôvodný štartovací symbol generoval epsilon, musíme ho zachovať
+    cez nový štartovací symbol.
 
-        while new_start in final_grammar:
-            new_start += "'"
+    Pôvodný jazyk L(G) sa tým zachová:
+        S' -> () | S
 
-        final_grammar[original_start] = [p for p in final_grammar[original_start] if p != ""]
-        final_grammar[new_start] = [original_start]
+    Interne je epsilon uložený ako prázdny reťazec "".
+    V GUI sa potom zobrazuje ako ε alebo ().
+    """
+    if original_start not in epsilon_nt:
+        return final_grammar, original_start
 
-        return final_grammar, new_start
+    new_start = original_start + "'"
 
-    return final_grammar, original_start
+    while new_start in final_grammar:
+        new_start += "'"
+
+    # Ak po odstránení epsilon pravidiel pôvodný štart ešte má pravidlá,
+    # nový štart vie generovať epsilon aj všetky pôvodné neprázdne slová.
+    if original_start in final_grammar:
+        final_grammar[new_start] = ["", original_start]
+    else:
+        # Prípad napr. S -> ()
+        # Jazyk je iba { epsilon }, preto nový štart obsahuje iba epsilon.
+        final_grammar[new_start] = [""]
+
+    return final_grammar, new_start
 
 
 def find_neperspektivne(grammar, non_terminals):
@@ -1106,7 +1240,13 @@ def remove_unreachable(grammar, unreachable, protected=None):
 # =========================
 
 def create_fresh_left_recursion_nonterminal(nt, grammar, ordered_nonterminals, orig_start):
-    if nt == orig_start and "Z" not in grammar and "Z" not in ordered_nonterminals:
+    """
+    Vytvorí čerstvý pomocný neterminál pre odstránenie ľavej rekurzie.
+
+    Podľa prednášky sa často používa nový symbol Z.
+    Preto ho použijeme, ak je voľný. Inak vytvoríme napr. A', A'', ...
+    """
+    if "Z" not in grammar and "Z" not in ordered_nonterminals:
         candidate = "Z"
     else:
         candidate = nt + "'"
@@ -1118,6 +1258,20 @@ def create_fresh_left_recursion_nonterminal(nt, grammar, ordered_nonterminals, o
 
 
 def remove_direct_left_recursion_single(nt, grammar, ordered_nonterminals, orig_start):
+    """
+    Odstráni priamu ľavú rekurziu pre jeden neterminál.
+
+    Tvar pred úpravou:
+        A -> Aα1 | Aα2 | β1 | β2
+
+    Tvar po úprave:
+        A -> β1 | β2 | β1Z | β2Z
+        Z -> α1 | α2 | α1Z | α2Z
+
+    Ošetruje aj prípady:
+        A -> A
+        A -> Aa bez beta vetvy
+    """
     if nt not in grammar:
         return None
 
@@ -1131,15 +1285,31 @@ def remove_direct_left_recursion_single(nt, grammar, ordered_nonterminals, orig_
         tokens = tokenize_by_nonterminals(prod, current_nonterminals)
 
         if tokens and tokens[0] == nt:
-            alpha.append(join_tokens(tokens[1:]))
+            suffix = join_tokens(tokens[1:])
+
+            # A -> A je iba identický cyklus, nepridáva nové slová
+            if suffix != "":
+                alpha.append(suffix)
         else:
             beta.append(prod)
 
+    # Ak tam bola iba produkcia A -> A, odstránime ju a necháme beta pravidlá.
     if not alpha:
-        grammar[nt] = productions
+        grammar[nt] = unique_preserve_order(beta)
         return None
 
-    new_nt = create_fresh_left_recursion_nonterminal(nt, grammar, ordered_nonterminals, orig_start)
+    # Ak neexistuje beta vetva, neterminál nemá ukončenie do terminálneho slova.
+    # Necháme ho prázdny, neskôr ho odstráni remove_unproductive().
+    if not beta:
+        grammar[nt] = []
+        return None
+
+    new_nt = create_fresh_left_recursion_nonterminal(
+        nt,
+        grammar,
+        ordered_nonterminals,
+        orig_start
+    )
 
     new_beta = []
 
@@ -1150,9 +1320,6 @@ def remove_direct_left_recursion_single(nt, grammar, ordered_nonterminals, orig_
     new_alpha = []
 
     for item in alpha:
-        if item == "":
-            continue
-
         new_alpha.append(item)
         new_alpha.append(item + new_nt)
 
@@ -1162,22 +1329,72 @@ def remove_direct_left_recursion_single(nt, grammar, ordered_nonterminals, orig_
     return new_nt
 
 
-def remove_left_recursion(grammar, orig_start):
-    grammar_copy = {left: unique_preserve_order(list(prods)) for left, prods in grammar.items()}
-    ordered_nonterminals = list(grammar_copy.keys())
+def order_nonterminals_by_reachability(grammar, start_symbol):
+    """
+    Vytvorí poradie neterminálov podľa dostupnosti zo štartovacieho symbolu.
 
-    i = 0
+    Toto zodpovedá odporúčaniu z prednášky:
+    A1 ≺ A2 ≺ ... ≺ Ak môžeme voliť v poradí, v ktorom sú
+    neterminály dostupné zo štartu.
+    """
+    ordered = []
+    visited = set()
+    nonterminals = set(grammar.keys())
 
-    while i < len(ordered_nonterminals):
-        Ai = ordered_nonterminals[i]
+    def visit(nt):
+        if nt in visited or nt not in nonterminals:
+            return
 
+        visited.add(nt)
+        ordered.append(nt)
+
+        for prod in grammar.get(nt, []):
+            tokens = tokenize_by_nonterminals(prod, nonterminals)
+
+            for tok in tokens:
+                if tok in nonterminals and tok not in visited:
+                    visit(tok)
+
+    visit(start_symbol)
+
+    # Pre istotu doplníme aj nedostupné neterminály.
+    # Neskôr ich odstráni remove_unreachable().
+    for nt in grammar.keys():
+        if nt not in visited:
+            ordered.append(nt)
+
+    return ordered
+
+def remove_left_recursion(grammar, start_symbol):
+    """
+    Odstráni priamu aj nepriamu ľavú rekurziu podľa postupu z prednášky.
+
+    1. Zvolíme poradie neterminálov podľa dostupnosti zo štartu.
+    2. V prvom prechode dosadzujeme skoršie neterminály.
+    3. Ak vznikne priama ľavá rekurzia, odstránime ju.
+    4. Nový pomocný neterminál vložíme na začiatok usporiadania.
+
+    Funkcia vracia:
+        grammar_copy, ordered_nonterminals
+
+    ordered_nonterminals potom použijeme v druhom substitučnom kroku.
+    """
+    grammar_copy = {
+        left: unique_preserve_order(list(prods))
+        for left, prods in grammar.items()
+    }
+
+    original_order = order_nonterminals_by_reachability(grammar_copy, start_symbol)
+    ordered_nonterminals = list(original_order)
+
+    for Ai in original_order:
         if Ai not in grammar_copy:
-            i += 1
             continue
 
-        for j in range(i):
-            Aj = ordered_nonterminals[j]
+        current_index = ordered_nonterminals.index(Ai)
+        previous_nonterminals = ordered_nonterminals[:current_index]
 
+        for Aj in previous_nonterminals:
             if Aj not in grammar_copy:
                 continue
 
@@ -1201,15 +1418,94 @@ def remove_left_recursion(grammar, orig_start):
             Ai,
             grammar_copy,
             ordered_nonterminals,
-            orig_start
+            start_symbol
         )
 
+        # Podľa prednášky nový Zi zaradíme na začiatok usporiadania.
         if new_nt is not None and new_nt not in ordered_nonterminals:
-            ordered_nonterminals.insert(i + 1, new_nt)
+            ordered_nonterminals.insert(0, new_nt)
 
-        i += 1
+    return grammar_copy, ordered_nonterminals
 
-    return {left: prods for left, prods in grammar_copy.items() if prods}
+def is_terminal_prefixed_grammar(grammar):
+    """
+    Overí, či každé pravidlo začína terminálom alebo je epsilon.
+
+    Epsilon je interne reprezentovaný ako "".
+    """
+    nonterminals = set(grammar.keys())
+
+    for productions in grammar.values():
+        for prod in productions:
+            if prod == "":
+                continue
+
+            tokens = tokenize_by_nonterminals(prod, nonterminals)
+
+            if tokens and tokens[0] in nonterminals:
+                return False
+
+    return True
+
+
+def substitute_bottom_up_by_order(grammar, ordered_nonterminals):
+    """
+    Druhý substitučný krok po odstránení ľavej rekurzie.
+
+    Prechádzame neterminály zdola nahor podľa usporiadania.
+    Ak pravidlo začína neterminálom, ktorý je v poradí za aktuálnym
+    neterminálom, dosadíme jeho pravidlá.
+
+    Typicky:
+        S' -> Sab
+        S  -> ab | abZ
+
+    sa zmení na:
+        S' -> abab | abZab
+    """
+    current = {
+        left: unique_preserve_order(list(prods))
+        for left, prods in grammar.items()
+    }
+
+    ordered = [nt for nt in ordered_nonterminals if nt in current]
+
+    for nt in current.keys():
+        if nt not in ordered:
+            ordered.append(nt)
+
+    position = {nt: index for index, nt in enumerate(ordered)}
+
+    for i in range(len(ordered) - 1, -1, -1):
+        Ai = ordered[i]
+
+        if Ai not in current:
+            continue
+
+        nonterminals = set(current.keys())
+        new_productions = []
+
+        for prod in current[Ai]:
+            tokens = tokenize_by_nonterminals(prod, nonterminals)
+
+            if not tokens or tokens[0] not in nonterminals:
+                new_productions.append(prod)
+                continue
+
+            first_nt = tokens[0]
+            suffix = join_tokens(tokens[1:])
+
+            # Pri prechode zdola nahor dosádzame tie neterminály,
+            # ktoré sú v poradí za aktuálnym a už boli spracované.
+            if first_nt in position and position[first_nt] > i and first_nt in current:
+                for replacement in current[first_nt]:
+                    new_productions.append(replacement + suffix)
+            else:
+                new_productions.append(prod)
+
+        current[Ai] = unique_preserve_order(new_productions)
+
+    return current, is_terminal_prefixed_grammar(current)
 
 
 # =========================
@@ -1228,7 +1524,7 @@ def grammar_signature(grammar):
 def make_exact_length_engine(grammar):
     if not grammar:
         def empty_exact(start_symbol, target_len):
-            return frozenset({""}) if target_len == 0 else frozenset()
+            return frozenset()
 
         return empty_exact
 
@@ -1388,8 +1684,11 @@ def make_exact_length_engine(grammar):
 
 
 def generate_strings_up_to_length(grammar, start_symbol, max_length):
+    if max_length < 0:
+        return []
+
     if not grammar or start_symbol not in grammar:
-        return [""] if max_length >= 0 else []
+        return []
 
     gen_nt_exact = make_exact_length_engine(grammar)
     all_strings = set()
@@ -1405,12 +1704,12 @@ def languages_equivalent_up_to_length(grammar1, start1, grammar2, start2, max_le
         return True
 
     if not grammar1:
-        gen1 = lambda s, length: frozenset({""}) if length == 0 else frozenset()
+        gen1 = lambda s, length: frozenset()
     else:
         gen1 = make_exact_length_engine(grammar1)
 
     if not grammar2:
-        gen2 = lambda s, length: frozenset({""}) if length == 0 else frozenset()
+        gen2 = lambda s, length: frozenset()
     else:
         gen2 = make_exact_length_engine(grammar2)
 
@@ -1423,12 +1722,12 @@ def languages_equivalent_up_to_length(grammar1, start1, grammar2, start2, max_le
 
 def find_counterexample_up_to_length(grammar1, start1, grammar2, start2, max_length):
     if not grammar1:
-        gen1 = lambda s, length: frozenset({""}) if length == 0 else frozenset()
+        gen1 = lambda s, length: frozenset()
     else:
         gen1 = make_exact_length_engine(grammar1)
 
     if not grammar2:
-        gen2 = lambda s, length: frozenset({""}) if length == 0 else frozenset()
+        gen2 = lambda s, length: frozenset()
     else:
         gen2 = make_exact_length_engine(grammar2)
 
@@ -1470,26 +1769,49 @@ def optimize_grammar(start_symbol, rules_input):
         epsilon_nt
     )
 
-    grammar_no_simple = remove_simple_rules(grammar_with_start, find_simple_rules(grammar_with_start))
-    grammar_left = remove_left_recursion(grammar_no_simple, start_symbol)
-
-    grammar_no_simple = remove_simple_rules(grammar_left, find_simple_rules(grammar_left))
-    grammar_left = remove_left_recursion(grammar_no_simple, start_symbol)
+    grammar_no_simple = remove_simple_rules(
+        grammar_with_start,
+        find_simple_rules(grammar_with_start)
+    )
 
     protected = {new_start_symbol}
 
-    unproductive = find_neperspektivne(grammar_left, list(grammar_left.keys()))
-    grammar_prod = remove_unproductive(grammar_left, unproductive)
+    unproductive = find_neperspektivne(grammar_no_simple, list(grammar_no_simple.keys()))
+    grammar_clean = remove_unproductive(grammar_no_simple, unproductive)
+
+    unreachable = find_unreachable(grammar_clean, new_start_symbol, protected)
+    grammar_clean = remove_unreachable(grammar_clean, unreachable, protected)
+
+    grammar_left, ordered_nonterminals = remove_left_recursion(
+        grammar_clean,
+        new_start_symbol
+    )
+
+    grammar_no_simple = remove_simple_rules(
+        grammar_left,
+        find_simple_rules(grammar_left)
+    )
+
+    grammar_substituted, terminal_prefix_success = substitute_bottom_up_by_order(
+        grammar_no_simple,
+        ordered_nonterminals
+    )
+
+    grammar_no_simple = remove_simple_rules(
+        grammar_substituted,
+        find_simple_rules(grammar_substituted)
+    )
+
+    unproductive = find_neperspektivne(grammar_no_simple, list(grammar_no_simple.keys()))
+    grammar_prod = remove_unproductive(grammar_no_simple, unproductive)
 
     unreachable = find_unreachable(grammar_prod, new_start_symbol, protected)
     grammar_reach = remove_unreachable(grammar_prod, unreachable, protected)
 
-    final_grammar = merge_equivalent_non_terminals_fixpoint(
-        grammar_reach,
-        list(grammar_reach.keys())
-    )
+    final_grammar = grammar_reach
 
     return final_grammar, new_start_symbol
+
 
 
 # =========================
@@ -1626,6 +1948,33 @@ def format_rule_lines(lhs, productions, max_line_chars=58):
 
     return lines
 
+def format_generated_word(word):
+    return "ε" if word == "" else word
+
+
+def format_generated_language(words, max_line_chars=95):
+    if not words:
+        return "{ }"
+
+    display_words = [format_generated_word(word) for word in words]
+
+    lines = []
+    current = "{ "
+
+    for index, word in enumerate(display_words):
+        separator = "" if index == 0 else ", "
+        candidate = current + separator + word
+
+        if len(candidate) <= max_line_chars:
+            current = candidate
+        else:
+            lines.append(current)
+            current = "  " + word
+
+    current += " }"
+    lines.append(current)
+
+    return "\n".join(lines)
 
 def configure_result_tags(text_widget=None):
     if text_widget is None:
@@ -1749,9 +2098,16 @@ def build_result_payload(eq_length: int):
             eq_length
         )
 
+    language1 = generate_strings_up_to_length(final1, start1_opt, eq_length)
+    language2 = generate_strings_up_to_length(final2, start2_opt, eq_length)
+
     return {
         "final1": final1,
         "final2": final2,
+        "start1_opt": start1_opt,
+        "start2_opt": start2_opt,
+        "language1": language1,
+        "language2": language2,
         "eq_length": eq_length,
         "equivalent": equivalent,
         "counterexample": counterexample
@@ -1842,7 +2198,7 @@ def insert_grammar_preview(text_widget, grammar_title, grammar, tag_prefix):
             )
             text_widget.insert(tk.END, "\n")
 
-    text_widget.insert(tk.END, "\n")
+    #text_widget.insert(tk.END, "\n")
 
 
 def insert_linear_grammar_preview(text_widget, grammar_title, grammar, success, tag_prefix):
@@ -1942,7 +2298,7 @@ def finish_result_text_widget(text_widget):
 
     line_count = int(text_widget.index("end-1c").split(".")[0])
     text_widget.config(
-        height=max(1, line_count + 1),
+        height=max(1, line_count),
         state="disabled"
     )
 
@@ -1996,6 +2352,48 @@ def add_summary_block(payload):
 
     finish_result_text_widget(summary_text)
 
+def add_generated_languages_block(row_index, payload):
+        block = tk.Frame(result_content_frame, bg="white")
+        block.grid(row=row_index, column=0, sticky="nsew", padx=16, pady=(8, 10))
+        block.grid_columnconfigure(0, weight=1)
+
+        text_widget = create_result_text_widget(block)
+        text_widget.pack(fill="both", expand=True)
+
+        language1 = payload.get("language1", [])
+        language2 = payload.get("language2", [])
+        eq_length = payload.get("eq_length", "")
+
+        text_widget.insert(
+            tk.END,
+            f"Vygenerované jazyky do dĺžky {eq_length}\n",
+            ("section_title",)
+        )
+
+        text_widget.insert(
+            tk.END,
+            f"L(G1) obsahuje {len(language1)} slov:\n",
+            ("submeta",)
+        )
+        text_widget.insert(
+            tk.END,
+            format_generated_language(language1) + "\n\n",
+            ("rule",)
+        )
+
+        text_widget.insert(
+            tk.END,
+            f"L(G2) obsahuje {len(language2)} slov:\n",
+            ("submeta",)
+        )
+        text_widget.insert(
+            tk.END,
+            format_generated_language(language2) + "\n\n",
+            ("rule",)
+        )
+
+        finish_result_text_widget(text_widget)
+
 
 def add_single_grammar_block(row_index, grammar_title, grammar, tag_prefix):
     block = tk.Frame(result_content_frame, bg="white")
@@ -2035,6 +2433,12 @@ def render_result(payload):
         return
 
     add_result_separator(1)
+
+    # Výpis vygenerovaných jazykov je zatiaľ vypnutý.
+    # Ak ho budeš chcieť znovu zapnúť, odkomentuj tieto dva riadky
+    # a posuň číslovanie riadkov späť podľa pôvodnej verzie.
+    # add_generated_languages_block(2, payload)
+    # add_result_separator(3)
 
     add_single_grammar_block(
         2,
